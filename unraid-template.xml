@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Luma</Name>
+  <Repository>ghcr.io/netpersona/luma</Repository>
+  <Registry>https://ghcr.io/netpersona/luma</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/netpersona/luma/issues</Support>
+  <Project>https://github.com/netpersona/luma</Project>
+  <Overview>Luma is a modern, fully self-hosted personal library management system with built-in e-reader and audiobook player. Supports EPUB, PDF, MOBI, CBZ, CBR for books and M4B, MP3, M4A for audiobooks. Features include progress tracking, collections, bookmarks, highlights, annotations, automatic metadata extraction, multi-user authentication, and a beautiful interface. Uses local SQLite database - no external database required.</Overview>
+  <Category>MediaApp:Books MediaApp:Music MediaApp:Other Status:Stable</Category>
+  <WebUI>http://[IP]:[PORT:5000]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/netpersona/luma/main/unraid-template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/netpersona/luma/main/client/public/favicon.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="WebUI Port" Target="5000" Default="5000" Mode="tcp" Description="Web interface port - change this to use a different port" Type="Port" Display="always" Required="true" Mask="false">5000</Config>
+  <Config Name="Config Directory" Target="/config" Default="/mnt/user/appdata/luma/config" Mode="rw" Description="Directory for SQLite database and application settings (persists across updates)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/luma/config</Config>
+  <Config Name="Books Directory" Target="/data/books" Default="/mnt/user/appdata/luma/books" Mode="rw" Description="Directory for storing e-books (EPUB, PDF, MOBI, CBZ, CBR)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/luma/books</Config>
+  <Config Name="Audiobooks Directory" Target="/data/audiobooks" Default="/mnt/user/appdata/luma/audiobooks" Mode="rw" Description="Directory for storing audiobooks (M4B, MP3, M4A)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/luma/audiobooks</Config>
+  <Config Name="Covers Directory" Target="/data/covers" Default="/mnt/user/appdata/luma/covers" Mode="rw" Description="Directory for storing cover images" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/luma/covers</Config>
+  <Config Name="Uploads Directory" Target="/data/uploads" Default="/mnt/user/appdata/luma/uploads" Mode="rw" Description="Temporary directory for file uploads" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/luma/uploads</Config>
+  <Config Name="Session Secret" Target="SESSION_SECRET" Default="" Mode="" Description="Secret key for session encryption - Generate with: openssl rand -base64 32" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Application Port" Target="PORT" Default="5000" Mode="" Description="Internal application port (should match WebUI Port)" Type="Variable" Display="advanced" Required="true" Mask="false">5000</Config>
+  <Config Name="Data Directory" Target="DATA_DIR" Default="/config" Mode="" Description="Directory for SQLite database storage" Type="Variable" Display="advanced" Required="true" Mask="false">/config</Config>
+  <Config Name="Node Environment" Target="NODE_ENV" Default="production" Mode="" Description="Node.js environment (keep as production)" Type="Variable" Display="advanced" Required="true" Mask="false">production</Config>
+  <Config Name="PUID" Target="PUID" Default="1000" Mode="" Description="User ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">1000</Config>
+  <Config Name="PGID" Target="PGID" Default="1000" Mode="" Description="Group ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">1000</Config>
+  <Config Name="Google Books API Key" Target="GOOGLE_BOOKS_API_KEY" Default="" Mode="" Description="(Optional) Google Books API key for book recommendations" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="SendGrid API Key" Target="SENDGRID_API_KEY" Default="" Mode="" Description="(Optional) SendGrid API key for Send to Kindle/Email feature" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Resend API Key" Target="RESEND_API_KEY" Default="" Mode="" Description="(Optional) Resend API key for Send to Kindle/Email feature (alternative to SendGrid)" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+</Container>
