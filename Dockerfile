@@ -2,7 +2,8 @@
 # Build optimized production image for Unraid deployment
 
 # Stage 1: Build the application
-FROM node:20-alpine AS builder
+# Use Node 22 for full import.meta.dirname support
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -30,7 +31,7 @@ RUN ls -la dist/ && \
     echo "Build artifacts verified successfully"
 
 # Stage 2: Production runtime
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
@@ -62,10 +63,9 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/shared ./shared
 
 # Create directories for user data with proper permissions
-# /config stores the database and app settings (mount this for persistence)
-# /data stores books, audiobooks, covers and uploads
-RUN mkdir -p /config /data/books /data/audiobooks /data/covers /data/uploads && \
-    chown -R luma:luma /app /config /data
+# /data stores everything: database, books, audiobooks, covers, and uploads
+RUN mkdir -p /data/books /data/audiobooks /data/covers /data/uploads && \
+    chown -R luma:luma /app /data
 
 # Switch to non-root user
 USER luma
@@ -78,10 +78,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD node -e "require('http').get('http://localhost:5000/api/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"
 
 # Environment defaults
-# DATA_DIR: Location for SQLite database (mount /config for persistence across updates)
+# DATA_DIR: Location for SQLite database and all data files
 ENV NODE_ENV=production \
     PORT=5000 \
-    DATA_DIR=/config
+    DATA_DIR=/data
 
 # Start the application
 CMD ["node", "dist/index.js"]
