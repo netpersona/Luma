@@ -52,7 +52,7 @@ export function ContinueReadingBanner() {
     if (mostRecent.type === "book") {
       setLocation(`/reader/${mostRecent.id}`);
     } else {
-      setLocation(`/audiobook/${mostRecent.id}`);
+      setLocation(`/listen/${mostRecent.id}`);
     }
   };
 

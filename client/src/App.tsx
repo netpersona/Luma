@@ -43,6 +43,7 @@ import Statistics from "@/pages/statistics";
 import Series from "@/pages/series";
 import Goals from "@/pages/goals";
 import CarMode from "@/pages/car-mode";
+import Listen from "@/pages/listen";
 import BookClubs from "@/pages/book-clubs";
 import BookClubDetail from "@/pages/book-club-detail";
 import Login from "@/pages/login";
@@ -110,6 +111,7 @@ function ProtectedRoutes() {
       <Route path="/series" component={Series} />
       <Route path="/goals" component={Goals} />
       <Route path="/car-mode/:id" component={CarMode} />
+      <Route path="/listen/:id" component={Listen} />
       <Route path="/book-clubs" component={BookClubs} />
       <Route path="/book-clubs/:id" component={BookClubDetail} />
       <Route path="/settings" component={Settings} />

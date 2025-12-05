@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import type { ReactNode } from "react";
 import Uppy from "@uppy/core";
 import DashboardModal from "@uppy/react/dashboard-modal";
@@ -13,9 +13,10 @@ interface ObjectUploaderProps {
   maxNumberOfFiles?: number;
   maxFileSize?: number;
   allowedFileTypes?: string[];
-  onGetUploadParameters: () => Promise<{
+  onGetUploadParameters: (file: { name: string; type: string; size: number }) => Promise<{
     method: "PUT";
     url: string;
+    headers?: Record<string, string>;
   }>;
   onComplete?: (
     result: UploadResult<Record<string, unknown>, Record<string, unknown>>
@@ -36,6 +37,20 @@ export function ObjectUploader({
   children,
 }: ObjectUploaderProps) {
   const [showModal, setShowModal] = useState(false);
+  
+  // Use refs to ensure we always call the latest callback versions
+  const onCompleteRef = useRef(onComplete);
+  const onGetUploadParametersRef = useRef(onGetUploadParameters);
+  
+  // Keep refs in sync with props
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+  
+  useEffect(() => {
+    onGetUploadParametersRef.current = onGetUploadParameters;
+  }, [onGetUploadParameters]);
+  
   const [uppy] = useState(() => {
     const uppyInstance = new Uppy({
       restrictions: {
@@ -49,22 +64,41 @@ export function ObjectUploader({
     uppyInstance
       .use(AwsS3, {
         shouldUseMultipart: false,
-        getUploadParameters: onGetUploadParameters,
+        getUploadParameters: async (file) => {
+          // Use ref to always call the latest callback, passing file info
+          const params = await onGetUploadParametersRef.current({
+            name: file.name || 'file',
+            type: file.type || 'application/octet-stream',
+            size: file.size || 0,
+          });
+          return params;
+        },
       })
-      .on("complete", (result) => {
+      .on("complete", async (result) => {
         console.log('[Uppy] Complete event fired!', result);
-        try {
-          onComplete?.(result);
-        } catch (error) {
-          console.error('[Uppy] Error in onComplete callback:', error);
+        // Call the completion handler before closing the modal
+        const callback = onCompleteRef.current;
+        if (callback) {
+          console.log('[Uppy] Calling onComplete callback...');
+          try {
+            await callback(result);
+            console.log('[Uppy] onComplete callback finished successfully');
+          } catch (error) {
+            console.error('[Uppy] Error in onComplete callback:', error);
+            alert('Upload processing failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
+          }
+        } else {
+          console.warn('[Uppy] No onComplete callback set!');
         }
+        // Close modal after processing is complete
         setShowModal(false);
       })
       .on("upload-success", (file, response) => {
-        console.log('[Uppy] Upload success:', file?.name);
+        console.log('[Uppy] Upload success:', file?.name, response);
       })
       .on("upload-error", (file, error) => {
         console.error('[Uppy] Upload error:', file?.name, error);
+        alert(`Upload failed for ${file?.name}: ${error?.message || 'Unknown error'}`);
       });
 
     return uppyInstance;

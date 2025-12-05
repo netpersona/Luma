@@ -73,6 +73,15 @@
   }
 }
 
+/* EPUB Reader - basic styling */
+[data-testid="epub-reader-wrapper"] {
+  position: relative;
+}
+
+[data-testid="epub-viewer-container"] {
+  position: relative;
+}
+
 /**
  * Using the elevate system.
  * Automatic contrast adjustment.
@@ -1717,6 +1726,8 @@
   border-radius: var(--radius) !important;
   color: hsl(var(--card-foreground)) !important;
   box-shadow: 0 10px 50px rgba(0, 0, 0, 0.3) !important;
+  z-index: 9999 !important;
+  position: relative !important;
 }
 
 /* Add texture to Uppy modal for cottagecore themes */
