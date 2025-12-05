@@ -40,6 +40,7 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 
 # Install runtime dependencies including su-exec for user switching
+# Also include build tools to rebuild native modules for target CPU architecture
 RUN apk add --no-cache \
     cairo \
     jpeg \
@@ -47,11 +48,16 @@ RUN apk add --no-cache \
     giflib \
     ttf-dejavu \
     fontconfig \
-    su-exec
+    su-exec \
+    # Build tools for native module recompilation
+    python3 \
+    make \
+    g++
 
 # Create default app user (will be modified at runtime based on PUID/PGID)
-RUN addgroup -g 1000 luma && \
-    adduser -D -u 1000 -G luma luma
+# Use high UID/GID to avoid conflicts with existing users in base image
+RUN addgroup -g 911 luma && \
+    adduser -D -u 911 -G luma luma
 
 # Copy package files
 COPY package*.json ./
@@ -59,6 +65,11 @@ COPY package*.json ./
 # Copy node_modules from builder (includes vite which is needed for server imports)
 # This is larger than --omit=dev but required because server/vite.ts has static vite imports
 COPY --from=builder /app/node_modules ./node_modules
+
+# IMPORTANT: Rebuild better-sqlite3 from source for the target CPU architecture
+# This fixes "Illegal instruction" errors on older CPUs that don't support AVX2
+# The prebuilt binaries may use CPU instructions not available on all systems
+RUN npm rebuild better-sqlite3 --build-from-source
 
 # Copy built application from builder
 # dist/ contains: index.js (bundled server) and public/ (frontend assets)
