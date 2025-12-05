@@ -103,6 +103,16 @@ export class AnnasArchiveProvider implements SourceProvider {
 
       for (const item of results) {
         try {
+          // Extract ISBN - check various possible field names
+          let isbn: string | undefined;
+          if (item.isbn13) isbn = item.isbn13;
+          else if (item.isbn10) isbn = item.isbn10;
+          else if (item.isbn) isbn = item.isbn;
+          else if (item.ISBN) isbn = item.ISBN;
+          else if (item.isbns && Array.isArray(item.isbns) && item.isbns.length > 0) {
+            isbn = item.isbns[0];
+          }
+          
           const book: BookMetadata = {
             id: item.md5 || item.id || item.MD5,
             title: item.title || item.Title || 'Unknown Title',
@@ -111,6 +121,7 @@ export class AnnasArchiveProvider implements SourceProvider {
             language: item.language || item.Language || language,
             format: item.extension || item.format || item.Extension || format,
             cover_url: item.imgUrl || item.cover_url || item.thumbnail || item.cover || item.Cover,
+            isbn: isbn,
             source: 'annas-archive',
           };
           
@@ -171,6 +182,15 @@ export class AnnasArchiveProvider implements SourceProvider {
       const results = data.results || data.books || data || [];
       for (const item of results) {
         try {
+          // Extract ISBN - check various possible field names
+          let isbn: string | undefined;
+          if (item.isbn13) isbn = item.isbn13;
+          else if (item.isbn10) isbn = item.isbn10;
+          else if (item.isbn) isbn = item.isbn;
+          else if (item.isbns && Array.isArray(item.isbns) && item.isbns.length > 0) {
+            isbn = item.isbns[0];
+          }
+          
           const book: BookMetadata = {
             id: item.md5 || item.id,
             title: item.title || 'Unknown Title',
@@ -179,6 +199,7 @@ export class AnnasArchiveProvider implements SourceProvider {
             language: item.language || language,
             format: item.extension || item.format || format,
             cover_url: item.cover_url || item.thumbnail,
+            isbn: isbn,
             source: 'annas-archive',
           };
           

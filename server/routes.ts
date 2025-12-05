@@ -27,18 +27,22 @@ import {
   insertIntegrationSettingSchema,
 } from "@shared/schema";
 import { fromZodError } from "zod-validation-error";
-import { extractMetadataFromBuffer, extractDominantColors, extractDominantColorsWithMethod } from "./metadata";
+import { extractMetadataFromBuffer, extractDominantColors, extractDominantColorsWithMethod, lookupIsbnFromOpenLibrary, enrichMetadataByIsbn } from "./metadata";
 import { optimizeCover } from "./image-optimizer";
 import { encrypt, decrypt, maskSecret } from "./encryption";
 import { getSourceOrchestrator } from "./integrations/sourceOrchestrator";
 import { deliveryService } from "./services/deliveryService";
 import { fetchCoverImage, fetchCoverForBook, fetchCoverForAudiobook, searchCoverOptions, saveCoverFromUrl } from "./services/coverFetcher";
 import { calibreService } from "./services/calibreService";
-import { loadSettings, saveSettings, loadSecrets, saveSecrets, getConfigPaths, type AppSettings, type AppSecrets, type ColorExtractionMethod } from "./config";
+import { findSimilarBooks, searchOpenLibrary, fetchSeriesMetadata, batchFetchSeriesMetadata, type SimilarBookResult, type SeriesMetadata } from "./services/openLibraryAdapter";
+import { searchGoogleBooks, volumeToRecommendation } from "./services/googleBooksAdapter";
+import { loadSettings, saveSettings, loadSecrets, saveSecrets, getSecret, getConfigPaths, type AppSettings, type AppSecrets, type ColorExtractionMethod } from "./config";
 import { requireAuth, requireAdmin } from "./authRoutes";
+import { extractZipAudiobook, cleanupTempDir, processAndSaveCover, saveAudiobookTracks, type MultiFileAudiobookPreview, type AudioTrackInfo } from "./multifile-audiobook";
 import path from "path";
 import fs from "fs/promises";
 import fsSync from "fs";
+import { v4 as uuidv4 } from 'uuid';
 
 // Helper to extract colors using the configured method from settings
 async function extractColorsWithSettings(imageBuffer: Buffer): Promise<string[]> {
@@ -99,8 +103,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Store pending uploads in memory (file data stored temporarily)
   const pendingUploads = new Map<string, { data: Buffer; filename: string; contentType: string; timestamp: number }>();
 
-  // Local Storage - File upload endpoint
-  app.post("/api/upload", async (req, res) => {
+  // Store pending multi-file audiobook imports (preview data stored temporarily)
+  const pendingAudiobookImports = new Map<string, { preview: MultiFileAudiobookPreview; timestamp: number }>();
+
+  // Cleanup old pending imports periodically (every 30 minutes)
+  setInterval(() => {
+    const now = Date.now();
+    const maxAge = 30 * 60 * 1000; // 30 minutes
+    for (const [key, value] of pendingAudiobookImports.entries()) {
+      if (now - value.timestamp > maxAge) {
+        cleanupTempDir(value.preview.tempDir);
+        pendingAudiobookImports.delete(key);
+      }
+    }
+  }, 30 * 60 * 1000);
+
+  // Local Storage - File upload endpoint (handles both PUT and POST)
+  // PUT is used by Uppy AWS S3 plugin, POST is for legacy/direct uploads
+  const handleUpload = async (req: any, res: any) => {
     try {
       const chunks: Buffer[] = [];
       
@@ -109,9 +129,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const data = Buffer.concat(chunks);
-      const uploadId = generateUploadId();
-      const filename = req.headers['x-filename'] as string || 'file';
+      
+      // Get uploadId from URL path (e.g., /api/upload/abc123) or generate new one
+      const uploadId = req.params.uploadId || generateUploadId();
+      
+      // Get filename from query parameter (most reliable), or fall back to headers
+      const filename = (req.query.filename as string) ||
+                       (req.headers['x-filename'] as string) || 
+                       (req.headers['content-disposition']?.match(/filename="?([^";\n]+)"?/)?.[1]) ||
+                       'file';
       const contentType = req.headers['content-type'] || 'application/octet-stream';
+      
+      console.log(`[upload] Received file: ${filename}, size: ${data.length} bytes, uploadId: ${uploadId}`);
       
       // Store file data temporarily for processing
       pendingUploads.set(uploadId, { 
@@ -133,18 +162,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.error("Error handling upload:", error);
       res.status(500).json({ error: "Failed to handle upload" });
     }
-  });
+  };
 
-  // Legacy endpoint for backwards compatibility
+  // Support both PUT and POST for file uploads with uploadId in URL
+  app.put("/api/upload/:uploadId", handleUpload);
+  app.post("/api/upload/:uploadId", handleUpload);
+  // Also support uploads without uploadId in URL (generates new one)
+  app.put("/api/upload", handleUpload);
+  app.post("/api/upload", handleUpload);
+
+  // Get upload URL and ID for Uppy
   app.post("/api/objects/upload", async (_req, res) => {
     try {
-      // Return a local upload endpoint
+      // Generate uploadId and include it in the URL so the file can be associated
       const uploadId = generateUploadId();
-      res.json({ uploadURL: `/api/upload`, uploadId });
+      res.json({ uploadURL: `/api/upload/${uploadId}`, uploadId });
     } catch (error) {
       console.error("Error getting upload URL:", error);
       res.status(500).json({ error: "Failed to get upload URL" });
     }
+  });
+
+  // Debug endpoint to log pending uploads
+  app.get("/api/debug/pending-uploads", async (_req, res) => {
+    const entries = Array.from(pendingUploads.entries()).map(([id, data]) => ({
+      id,
+      filename: data.filename,
+      size: data.data.length,
+      contentType: data.contentType,
+      age: Date.now() - data.timestamp,
+    }));
+    console.log('[Debug] Pending uploads:', entries);
+    res.json({ pendingUploads: entries });
   });
 
   // Process uploaded files and extract metadata
@@ -292,16 +341,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
             });
             results.push({ type: "audiobook", id: audiobook.id });
           } else {
+            // Determine ISBN: use extracted metadata, or try Open Library as fallback
+            const bookTitle = metadata.title || path.basename(fileInfo.name, ext);
+            const bookAuthor = metadata.author;
+            let bookIsbn = metadata.isbn;
+            
+            if (!bookIsbn && bookTitle) {
+              try {
+                console.log(`[process-uploads] No ISBN in metadata, trying Open Library lookup for "${bookTitle}"`);
+                const openLibraryIsbn = await lookupIsbnFromOpenLibrary(bookTitle, bookAuthor);
+                if (openLibraryIsbn) {
+                  bookIsbn = openLibraryIsbn;
+                  console.log(`[process-uploads] Found ISBN via Open Library: ${bookIsbn}`);
+                }
+              } catch (openLibError) {
+                console.warn(`[process-uploads] Open Library lookup failed:`, openLibError);
+              }
+            }
+            
             // Create book record
             const book = await storage.createBook({
-              title: metadata.title || path.basename(fileInfo.name, ext),
-              author: metadata.author,
+              title: bookTitle,
+              author: bookAuthor,
               filePath,
               coverUrl,
               description: metadata.description,
               publisher: metadata.publisher,
               publishedDate: metadata.publishedYear ? String(metadata.publishedYear) : undefined,
-              isbn: metadata.isbn,
+              isbn: bookIsbn,
               language: metadata.language,
               series: metadata.series,
               pageCount: metadata.pageCount,
@@ -440,6 +507,82 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Local Storage - Serve files from audiobook subdirectories (multi-file audiobooks)
+  app.get("/local-files/audiobooks/:audiobookId/:filename", async (req, res) => {
+    try {
+      const { audiobookId, filename } = req.params;
+      
+      // Security: Reject path traversal patterns
+      if (audiobookId.includes('..') || filename.includes('..') || 
+          audiobookId.includes('/') || audiobookId.includes('\\') ||
+          filename.includes('/') || filename.includes('\\')) {
+        return res.status(400).json({ error: "Invalid path" });
+      }
+      
+      const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+      const fullPath = path.join(dataDir, 'audiobooks', audiobookId, filename);
+      
+      // Check if file exists
+      try {
+        await fs.access(fullPath);
+      } catch {
+        return res.status(404).json({ error: "File not found" });
+      }
+
+      const ext = path.extname(filename).toLowerCase();
+      const contentTypes: Record<string, string> = {
+        '.mp3': 'audio/mpeg',
+        '.m4a': 'audio/mp4',
+        '.m4b': 'audio/mp4',
+        '.ogg': 'audio/ogg',
+        '.opus': 'audio/opus',
+        '.flac': 'audio/flac',
+        '.aac': 'audio/aac',
+      };
+
+      const contentType = contentTypes[ext] || 'audio/mpeg';
+      const stat = await fs.stat(fullPath);
+      const fileSize = stat.size;
+
+      // Handle Range requests for audio seeking
+      const range = req.headers.range;
+      if (range) {
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        if (!match) {
+          return res.status(416).json({ error: "Invalid range" });
+        }
+
+        const start = match[1] ? parseInt(match[1], 10) : 0;
+        const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+
+        if (start >= fileSize || end >= fileSize) {
+          res.setHeader('Content-Range', `bytes */${fileSize}`);
+          return res.status(416).json({ error: "Range not satisfiable" });
+        }
+
+        const chunkSize = end - start + 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Length', chunkSize);
+        res.setHeader('Content-Type', contentType);
+
+        const fileStream = fsSync.createReadStream(fullPath, { start, end });
+        fileStream.pipe(res);
+      } else {
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Length', fileSize);
+        res.setHeader('Content-Type', contentType);
+        
+        const fileStream = fsSync.createReadStream(fullPath);
+        fileStream.pipe(res);
+      }
+    } catch (error: any) {
+      console.error("Error serving audiobook track:", error);
+      res.status(500).json({ error: "Failed to serve file" });
+    }
+  });
+
   // Local Storage - Serve files from local storage (Docker deployments)
   app.get("/local-files/:subdir/:filename", async (req, res) => {
     try {
@@ -484,9 +627,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const contentType = contentTypes[ext] || 'application/octet-stream';
       const stat = await fs.stat(fullPath);
+      const fileSize = stat.size;
 
+      // Handle Range requests for audio/video seeking
+      const range = req.headers.range;
+      if (range) {
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        if (!match) {
+          return res.status(416).json({ error: "Invalid range" });
+        }
+        
+        const start = match[1] ? parseInt(match[1], 10) : 0;
+        const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+        
+        // Validate range
+        if (start >= fileSize || end >= fileSize || start > end) {
+          res.setHeader('Content-Range', `bytes */${fileSize}`);
+          return res.status(416).json({ error: "Range not satisfiable" });
+        }
+        
+        const chunkSize = end - start + 1;
+        
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=86400',
+        });
+        
+        const fsSync = await import('fs');
+        fsSync.createReadStream(fullPath, { start, end }).pipe(res);
+        return;
+      }
+
+      // Full file response (no Range header)
       res.setHeader('Content-Type', contentType);
-      res.setHeader('Content-Length', stat.size);
+      res.setHeader('Content-Length', fileSize);
+      res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('Cache-Control', 'public, max-age=86400');
 
       const stream = await import('fs').then(fsSync => fsSync.createReadStream(fullPath));
@@ -849,6 +1027,181 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Fetch series metadata for a book from Open Library
+  app.post("/api/books/:id/fetch-series", async (req, res) => {
+    try {
+      const bookId = req.params.id;
+      const book = await storage.getBookById(bookId);
+      
+      if (!book) {
+        return res.status(404).json({ error: "Book not found" });
+      }
+      
+      console.log(`[series-fetch] Fetching series for "${book.title}" by ${book.author || 'unknown'}`);
+      
+      const seriesMetadata = await fetchSeriesMetadata(book.title, book.author || undefined);
+      
+      // If we found series info, optionally auto-update the book
+      const autoUpdate = req.body.autoUpdate === true;
+      
+      if (autoUpdate && (seriesMetadata.seriesName || seriesMetadata.seriesIndex)) {
+        const updates: any = {};
+        if (seriesMetadata.seriesName && !book.series) {
+          updates.series = seriesMetadata.seriesName;
+        }
+        if (seriesMetadata.seriesIndex && !book.seriesIndex) {
+          updates.seriesIndex = seriesMetadata.seriesIndex;
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          await storage.updateBook(bookId, updates);
+          console.log(`[series-fetch] Auto-updated book with:`, updates);
+        }
+      }
+      
+      const updatedBook = autoUpdate ? await storage.getBookById(bookId) : book;
+      
+      res.json({
+        success: true,
+        metadata: seriesMetadata,
+        book: updatedBook
+      });
+    } catch (error: any) {
+      console.error("[series-fetch] Error:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch series metadata" });
+    }
+  });
+
+  // Fetch series metadata for an audiobook from Open Library
+  app.post("/api/audiobooks/:id/fetch-series", async (req, res) => {
+    try {
+      const audiobookId = req.params.id;
+      const audiobook = await storage.getAudiobookById(audiobookId);
+      
+      if (!audiobook) {
+        return res.status(404).json({ error: "Audiobook not found" });
+      }
+      
+      console.log(`[series-fetch] Fetching series for audiobook "${audiobook.title}" by ${audiobook.author || 'unknown'}`);
+      
+      const seriesMetadata = await fetchSeriesMetadata(audiobook.title, audiobook.author || undefined);
+      
+      // If we found series info, optionally auto-update the audiobook
+      const autoUpdate = req.body.autoUpdate === true;
+      
+      if (autoUpdate && (seriesMetadata.seriesName || seriesMetadata.seriesIndex)) {
+        const updates: any = {};
+        if (seriesMetadata.seriesName && !audiobook.series) {
+          updates.series = seriesMetadata.seriesName;
+        }
+        if (seriesMetadata.seriesIndex && !audiobook.seriesIndex) {
+          updates.seriesIndex = seriesMetadata.seriesIndex;
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          await storage.updateAudiobook(audiobookId, updates);
+          console.log(`[series-fetch] Auto-updated audiobook with:`, updates);
+        }
+      }
+      
+      const updatedAudiobook = autoUpdate ? await storage.getAudiobookById(audiobookId) : audiobook;
+      
+      res.json({
+        success: true,
+        metadata: seriesMetadata,
+        audiobook: updatedAudiobook
+      });
+    } catch (error: any) {
+      console.error("[series-fetch] Error:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch series metadata" });
+    }
+  });
+
+  // Bulk refresh series metadata for all books/audiobooks missing series info
+  app.post("/api/library/refresh-series", async (req, res) => {
+    try {
+      const { type = 'all', overwrite = false } = req.body;
+      
+      const results = {
+        booksProcessed: 0,
+        audiobooksProcessed: 0,
+        booksUpdated: 0,
+        audiobooksUpdated: 0,
+        errors: [] as string[]
+      };
+      
+      // Process books
+      if (type === 'all' || type === 'books') {
+        const allBooks = await storage.getAllBooks();
+        const booksToProcess = overwrite 
+          ? allBooks 
+          : allBooks.filter(b => !b.series);
+        
+        console.log(`[bulk-series] Processing ${booksToProcess.length} books...`);
+        
+        const bookItems = booksToProcess.map(b => ({ id: b.id, title: b.title, author: b.author || undefined }));
+        const bookMetadata = await batchFetchSeriesMetadata(bookItems);
+        
+        for (const [bookId, metadata] of bookMetadata) {
+          results.booksProcessed++;
+          
+          if (metadata.seriesName || metadata.seriesIndex) {
+            try {
+              const updates: any = {};
+              if (metadata.seriesName) updates.series = metadata.seriesName;
+              if (metadata.seriesIndex) updates.seriesIndex = metadata.seriesIndex;
+              
+              await storage.updateBook(bookId, updates);
+              results.booksUpdated++;
+            } catch (err: any) {
+              results.errors.push(`Book ${bookId}: ${err.message}`);
+            }
+          }
+        }
+      }
+      
+      // Process audiobooks
+      if (type === 'all' || type === 'audiobooks') {
+        const allAudiobooks = await storage.getAllAudiobooks();
+        const audiobooksToProcess = overwrite 
+          ? allAudiobooks 
+          : allAudiobooks.filter(a => !a.series);
+        
+        console.log(`[bulk-series] Processing ${audiobooksToProcess.length} audiobooks...`);
+        
+        const audiobookItems = audiobooksToProcess.map(a => ({ id: a.id, title: a.title, author: a.author || undefined }));
+        const audiobookMetadata = await batchFetchSeriesMetadata(audiobookItems);
+        
+        for (const [audiobookId, metadata] of audiobookMetadata) {
+          results.audiobooksProcessed++;
+          
+          if (metadata.seriesName || metadata.seriesIndex) {
+            try {
+              const updates: any = {};
+              if (metadata.seriesName) updates.series = metadata.seriesName;
+              if (metadata.seriesIndex) updates.seriesIndex = metadata.seriesIndex;
+              
+              await storage.updateAudiobook(audiobookId, updates);
+              results.audiobooksUpdated++;
+            } catch (err: any) {
+              results.errors.push(`Audiobook ${audiobookId}: ${err.message}`);
+            }
+          }
+        }
+      }
+      
+      console.log(`[bulk-series] Completed. Books: ${results.booksUpdated}/${results.booksProcessed} updated, Audiobooks: ${results.audiobooksUpdated}/${results.audiobooksProcessed} updated`);
+      
+      res.json({
+        success: true,
+        results
+      });
+    } catch (error: any) {
+      console.error("[bulk-series] Error:", error);
+      res.status(500).json({ error: error.message || "Failed to refresh series metadata" });
+    }
+  });
+
   // Audiobooks endpoints
   app.get("/api/audiobooks", async (req, res) => {
     try {
@@ -873,6 +1226,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Get tracks for a multi-file audiobook
+  app.get("/api/audiobooks/:id/tracks", async (req, res) => {
+    try {
+      const tracks = await storage.getAudiobookTracks(req.params.id);
+      res.json(tracks);
+    } catch (error) {
+      console.error("Error getting audiobook tracks:", error);
+      res.status(500).json({ error: "Failed to get audiobook tracks" });
+    }
+  });
+
   app.post("/api/audiobooks", async (req, res) => {
     try {
       const validated = insertAudiobookSchema.parse(req.body);
@@ -885,6 +1249,232 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: validationError.message });
       }
       res.status(500).json({ error: "Failed to create audiobook" });
+    }
+  });
+
+  // Multi-file audiobook upload - accepts zip file and returns preview for review
+  const zipUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 2 * 1024 * 1024 * 1024, // 2GB max for audiobook archives
+    },
+    fileFilter: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      if (ext === '.zip') {
+        cb(null, true);
+      } else {
+        cb(new Error('Only ZIP files are allowed for multi-file audiobook uploads'));
+      }
+    },
+  });
+
+  app.post("/api/audiobooks/upload-multifile", zipUpload.single('file'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "ZIP file is required" });
+      }
+
+      console.log(`[multifile-audiobook] Processing zip upload: ${req.file.originalname}`);
+      
+      // Extract and analyze the zip file
+      const preview = await extractZipAudiobook(req.file.buffer, req.file.originalname);
+      
+      // Generate a unique import ID
+      const importId = uuidv4();
+      
+      // Store the preview for later confirmation
+      pendingAudiobookImports.set(importId, {
+        preview,
+        timestamp: Date.now()
+      });
+
+      console.log(`[multifile-audiobook] Created import preview ${importId}: ${preview.trackCount} tracks, ${Math.round(preview.totalDuration / 60)} minutes`);
+
+      // Return preview data (without cover binary, include cover indicator)
+      res.json({
+        importId,
+        title: preview.title,
+        author: preview.author,
+        narrator: preview.narrator,
+        description: preview.description,
+        publisher: preview.publisher,
+        series: preview.series,
+        seriesIndex: preview.seriesIndex,
+        totalDuration: preview.totalDuration,
+        totalSize: preview.totalSize,
+        trackCount: preview.trackCount,
+        tracks: preview.tracks.map(t => ({
+          filename: t.filename,
+          title: t.title,
+          trackIndex: t.trackIndex,
+          duration: t.duration,
+          fileSize: t.fileSize
+        })),
+        hasCover: !!preview.coverData
+      });
+    } catch (error: any) {
+      console.error("[multifile-audiobook] Error processing zip upload:", error);
+      res.status(500).json({ error: error.message || "Failed to process audiobook archive" });
+    }
+  });
+
+  // Get cover preview for pending import
+  app.get("/api/audiobooks/import/:importId/cover", async (req, res) => {
+    try {
+      const pending = pendingAudiobookImports.get(req.params.importId);
+      if (!pending) {
+        return res.status(404).json({ error: "Import not found or expired" });
+      }
+
+      if (!pending.preview.coverData) {
+        return res.status(404).json({ error: "No cover image available" });
+      }
+
+      res.set('Content-Type', pending.preview.coverMimeType || 'image/jpeg');
+      res.send(pending.preview.coverData);
+    } catch (error: any) {
+      console.error("[multifile-audiobook] Error serving cover preview:", error);
+      res.status(500).json({ error: "Failed to serve cover preview" });
+    }
+  });
+
+  // Confirm multi-file audiobook import with edited metadata
+  app.post("/api/audiobooks/import/:importId/confirm", async (req, res) => {
+    try {
+      const pending = pendingAudiobookImports.get(req.params.importId);
+      if (!pending) {
+        return res.status(404).json({ error: "Import not found or expired" });
+      }
+
+      const { preview } = pending;
+      const {
+        title,
+        author,
+        narrator,
+        description,
+        publisher,
+        series,
+        seriesIndex,
+        tracks: editedTracks
+      } = req.body;
+
+      // Use edited values or fall back to preview values
+      const finalTitle = title || preview.title;
+      const finalAuthor = author || preview.author;
+      const finalNarrator = narrator || preview.narrator;
+      const finalDescription = description || preview.description;
+      const finalPublisher = publisher || preview.publisher;
+      const finalSeries = series || preview.series;
+      const finalSeriesIndex = seriesIndex !== undefined ? seriesIndex : preview.seriesIndex;
+
+      // Get data directory
+      const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+
+      console.log(`[multifile-audiobook] Confirming import ${req.params.importId}: "${finalTitle}"`);
+
+      // First, create the audiobook record to get the auto-generated ID
+      const audiobook = await storage.createAudiobook({
+        title: finalTitle,
+        author: finalAuthor || undefined,
+        narrator: finalNarrator || undefined,
+        description: finalDescription || undefined,
+        publisher: finalPublisher || undefined,
+        series: finalSeries || undefined,
+        seriesIndex: finalSeriesIndex,
+        filePath: '', // Placeholder, will update after saving tracks
+        format: 'multi',
+        fileSize: preview.totalSize,
+        duration: preview.totalDuration,
+        trackCount: preview.trackCount
+      });
+
+      const audiobookId = audiobook.id;
+      console.log(`[multifile-audiobook] Created audiobook record with ID: ${audiobookId}`);
+
+      // Process and save cover if available
+      let coverUrl: string | undefined;
+      let dominantColors: string[] = [];
+      
+      if (preview.coverData) {
+        const coverResult = await processAndSaveCover(preview.coverData, audiobookId, dataDir);
+        coverUrl = coverResult.coverUrl;
+        dominantColors = coverResult.dominantColors;
+      }
+
+      // Save audio tracks to permanent storage using actual audiobook ID
+      const savedTracks = await saveAudiobookTracks(preview, audiobookId, dataDir);
+
+      // Update track titles if edited
+      if (editedTracks && Array.isArray(editedTracks)) {
+        for (const editedTrack of editedTracks) {
+          const saved = savedTracks.find(t => t.trackIndex === editedTrack.trackIndex);
+          if (saved && editedTrack.title) {
+            saved.title = editedTrack.title;
+          }
+        }
+      }
+
+      // Update audiobook with correct file path and cover
+      await storage.updateAudiobook(audiobookId, {
+        filePath: `/local-files/audiobooks/${audiobookId}`,
+        coverUrl: coverUrl || undefined,
+        dominantColors: dominantColors.length > 0 ? JSON.stringify(dominantColors) : undefined
+      });
+      
+      // Create track records
+      const trackRecords = savedTracks.map(track => ({
+        id: uuidv4(),
+        audiobookId: audiobookId,
+        trackIndex: track.trackIndex,
+        title: track.title,
+        filePath: track.filePath,
+        duration: track.duration,
+        fileSize: track.fileSize,
+        bitrate: track.bitrate
+      }));
+
+      await storage.createAudiobookTracks(trackRecords);
+
+      console.log(`[multifile-audiobook] Successfully imported audiobook ${audiobookId} with ${trackRecords.length} tracks`);
+
+      // Cleanup temp directory
+      cleanupTempDir(preview.tempDir);
+      pendingAudiobookImports.delete(req.params.importId);
+
+      // Return the created audiobook
+      res.status(201).json({
+        audiobook,
+        tracks: trackRecords
+      });
+    } catch (error: any) {
+      console.error("[multifile-audiobook] Error confirming import:", error);
+      res.status(500).json({ error: error.message || "Failed to import audiobook" });
+    }
+  });
+
+  // Cancel pending import and cleanup
+  app.delete("/api/audiobooks/import/:importId", async (req, res) => {
+    try {
+      const pending = pendingAudiobookImports.get(req.params.importId);
+      if (pending) {
+        cleanupTempDir(pending.preview.tempDir);
+        pendingAudiobookImports.delete(req.params.importId);
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("[multifile-audiobook] Error canceling import:", error);
+      res.status(500).json({ error: "Failed to cancel import" });
+    }
+  });
+
+  // Get tracks for an audiobook
+  app.get("/api/audiobooks/:id/tracks", async (req, res) => {
+    try {
+      const tracks = await storage.getAudiobookTracks(req.params.id);
+      res.json(tracks);
+    } catch (error: any) {
+      console.error("Error getting audiobook tracks:", error);
+      res.status(500).json({ error: "Failed to get audiobook tracks" });
     }
   });
 
@@ -1296,7 +1886,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
         value: setting.isSecret && setting.value ? maskSecret(setting.value) : setting.value,
       }));
       
-      res.json(maskedSettings);
+      // Add synthetic settings for server-level secrets (from .secrets.json or env vars)
+      const serverSettings: Array<{ key: string; value: string; isSecret: boolean; source: string }> = [];
+      
+      // Check for Google Books API key from server secrets or environment
+      const hasDbGoogleBooksKey = settings.some(s => s.key === 'user:default:googleBooksApiKey' && s.value);
+      if (!hasDbGoogleBooksKey) {
+        const serverGoogleBooksKey = getSecret('googleBooksApiKey');
+        if (serverGoogleBooksKey) {
+          serverSettings.push({
+            key: 'user:default:googleBooksApiKey',
+            value: '••••••••',
+            isSecret: true,
+            source: 'server'
+          });
+        }
+      }
+      
+      // Check for SendGrid API key from server secrets or environment
+      const hasDbSendGridKey = settings.some(s => s.key === 'sendgridApiKey' && s.value);
+      if (!hasDbSendGridKey) {
+        const serverSendGridKey = getSecret('sendgridApiKey');
+        if (serverSendGridKey) {
+          serverSettings.push({
+            key: 'sendgridApiKey',
+            value: '••••••••',
+            isSecret: true,
+            source: 'server'
+          });
+        }
+      }
+      
+      // Check for Resend API key from server secrets or environment
+      const hasDbResendKey = settings.some(s => s.key === 'resendApiKey' && s.value);
+      if (!hasDbResendKey) {
+        const serverResendKey = getSecret('resendApiKey');
+        if (serverResendKey) {
+          serverSettings.push({
+            key: 'resendApiKey',
+            value: '••••••••',
+            isSecret: true,
+            source: 'server'
+          });
+        }
+      }
+      
+      res.json([...maskedSettings, ...serverSettings]);
     } catch (error) {
       console.error("Error getting settings:", error);
       res.status(500).json({ error: "Failed to get settings" });
@@ -1547,6 +2182,102 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("Error cleaning up audiobooks:", error);
       res.status(500).json({ error: error.message || "Failed to cleanup audiobooks" });
+    }
+  });
+
+  // Bulk fetch series metadata for all books/audiobooks without series info
+  app.post("/api/library/fetch-all-series", requireAdmin, async (req, res) => {
+    try {
+      console.log("[Bulk Series Fetch] Starting bulk series metadata fetch...");
+      
+      // Get all books and audiobooks without series info
+      const allBooks = await storage.getAllBooks();
+      const allAudiobooks = await storage.getAllAudiobooks();
+      
+      const booksWithoutSeries = allBooks.filter(b => !b.series);
+      const audiobooksWithoutSeries = allAudiobooks.filter(a => !a.series);
+      
+      const total = booksWithoutSeries.length + audiobooksWithoutSeries.length;
+      console.log(`[Bulk Series Fetch] Found ${booksWithoutSeries.length} books and ${audiobooksWithoutSeries.length} audiobooks without series info`);
+      
+      let updated = 0;
+      let failed = 0;
+      const details: Array<{ title: string; series?: string; seriesIndex?: number; error?: string }> = [];
+      
+      // Process books
+      for (const book of booksWithoutSeries) {
+        try {
+          const seriesMetadata = await fetchSeriesMetadata(book.title, book.author || undefined);
+          
+          if (seriesMetadata.seriesName) {
+            const updates: any = {};
+            updates.series = seriesMetadata.seriesName;
+            if (seriesMetadata.seriesIndex) {
+              updates.seriesIndex = seriesMetadata.seriesIndex;
+            }
+            
+            await storage.updateBook(book.id, updates);
+            updated++;
+            details.push({
+              title: book.title,
+              series: seriesMetadata.seriesName,
+              seriesIndex: seriesMetadata.seriesIndex || undefined,
+            });
+            console.log(`[Bulk Series Fetch] Updated "${book.title}" with series: ${seriesMetadata.seriesName}`);
+          } else {
+            details.push({ title: book.title });
+          }
+          
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (err) {
+          failed++;
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          details.push({ title: book.title, error: errorMsg });
+          console.error(`[Bulk Series Fetch] Error processing book "${book.title}":`, errorMsg);
+        }
+      }
+      
+      // Process audiobooks
+      for (const audiobook of audiobooksWithoutSeries) {
+        try {
+          const seriesMetadata = await fetchSeriesMetadata(audiobook.title, audiobook.author || undefined);
+          
+          if (seriesMetadata.seriesName) {
+            const updates: any = {};
+            updates.series = seriesMetadata.seriesName;
+            if (seriesMetadata.seriesIndex) {
+              updates.seriesIndex = seriesMetadata.seriesIndex;
+            }
+            
+            await storage.updateAudiobook(audiobook.id, updates);
+            updated++;
+            details.push({
+              title: audiobook.title,
+              series: seriesMetadata.seriesName,
+              seriesIndex: seriesMetadata.seriesIndex || undefined,
+            });
+            console.log(`[Bulk Series Fetch] Updated audiobook "${audiobook.title}" with series: ${seriesMetadata.seriesName}`);
+          } else {
+            details.push({ title: audiobook.title });
+          }
+          
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (err) {
+          failed++;
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          details.push({ title: audiobook.title, error: errorMsg });
+          console.error(`[Bulk Series Fetch] Error processing audiobook "${audiobook.title}":`, errorMsg);
+        }
+      }
+      
+      console.log(`[Bulk Series Fetch] Complete: ${updated} updated, ${failed} failed out of ${total} total`);
+      
+      res.json({ total, updated, failed, details });
+    } catch (error: any) {
+      console.error("Error in bulk series fetch:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch series metadata" });
     }
   });
 
@@ -1825,7 +2556,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/integrations/annas-archive/download", async (req, res) => {
     try {
-      const { md5, title, author, format, cover_url } = req.body;
+      const { md5, title, author, format, cover_url, isbn } = req.body;
       
       if (!md5) {
         return res.status(400).json({ error: "MD5 hash is required" });
@@ -1942,23 +2673,84 @@ export async function registerRoutes(app: Express): Promise<Server> {
         coverUrl = await saveLocalFile(coverData, 'covers', '.webp');
       }
       
+      // Determine ISBN: prefer extracted metadata, then search result, then Open Library lookup
+      let finalIsbn = metadata.isbn || isbn;
+      const finalTitle = metadata.title || title || "Unknown";
+      const finalAuthor = metadata.author || author;
+      
+      // If no ISBN found, try Open Library as a fallback (async, non-blocking for book creation)
+      if (!finalIsbn && finalTitle && finalTitle !== "Unknown") {
+        try {
+          console.log(`[annas-archive] No ISBN found, trying Open Library lookup for "${finalTitle}"`);
+          const openLibraryIsbn = await lookupIsbnFromOpenLibrary(finalTitle, finalAuthor);
+          if (openLibraryIsbn) {
+            finalIsbn = openLibraryIsbn;
+            console.log(`[annas-archive] Found ISBN via Open Library: ${finalIsbn}`);
+          }
+        } catch (openLibError) {
+          console.warn("[annas-archive] Open Library lookup failed:", openLibError);
+          // Continue without ISBN - it's optional
+        }
+      }
+      
+      // Enrich metadata using ISBN if we have one and are missing data
+      let enrichedDescription = metadata.description;
+      let enrichedPublisher = metadata.publisher;
+      let enrichedPublishedDate = metadata.publishedYear ? String(metadata.publishedYear) : undefined;
+      let enrichedPageCount = metadata.pageCount;
+      let enrichedTags = metadata.tags;
+      
+      if (finalIsbn) {
+        try {
+          console.log(`[annas-archive] Enriching metadata using ISBN: ${finalIsbn}`);
+          const enriched = await enrichMetadataByIsbn(finalIsbn);
+          
+          if (enriched) {
+            // Only fill in missing fields - don't overwrite existing data
+            if (!enrichedDescription && enriched.description) {
+              enrichedDescription = enriched.description;
+              console.log(`[annas-archive] Added description from ISBN lookup`);
+            }
+            if (!enrichedPublisher && enriched.publisher) {
+              enrichedPublisher = enriched.publisher;
+              console.log(`[annas-archive] Added publisher from ISBN lookup: ${enriched.publisher}`);
+            }
+            if (!enrichedPublishedDate && enriched.publishedDate) {
+              enrichedPublishedDate = enriched.publishedDate;
+              console.log(`[annas-archive] Added publish date from ISBN lookup: ${enriched.publishedDate}`);
+            }
+            if (!enrichedPageCount && enriched.pageCount) {
+              enrichedPageCount = enriched.pageCount;
+              console.log(`[annas-archive] Added page count from ISBN lookup: ${enriched.pageCount}`);
+            }
+            if ((!enrichedTags || enrichedTags.length === 0) && enriched.subjects && enriched.subjects.length > 0) {
+              enrichedTags = enriched.subjects;
+              console.log(`[annas-archive] Added ${enriched.subjects.length} tags from ISBN lookup`);
+            }
+          }
+        } catch (enrichError) {
+          console.warn("[annas-archive] ISBN metadata enrichment failed:", enrichError);
+          // Continue without enrichment - it's optional
+        }
+      }
+      
       // Create book record
       const bookData = {
-        title: metadata.title || title || "Unknown",
-        author: metadata.author || author,
-        description: metadata.description,
-        publisher: metadata.publisher,
-        publishedDate: metadata.publishedYear ? String(metadata.publishedYear) : undefined,
+        title: finalTitle,
+        author: finalAuthor,
+        description: enrichedDescription,
+        publisher: enrichedPublisher,
+        publishedDate: enrichedPublishedDate,
         language: metadata.language,
-        isbn: metadata.isbn,
-        format: format || "epub",
-        pageCount: metadata.pageCount,
+        isbn: finalIsbn,
+        format: (format || "epub").toUpperCase(),
+        pageCount: enrichedPageCount,
         filePath,
         coverUrl,
         dominantColors,
         source: "annas-archive",
         sourceId: md5,
-        tags: metadata.tags ? JSON.stringify(metadata.tags) : undefined,
+        tags: enrichedTags ? JSON.stringify(enrichedTags) : undefined,
       };
       
       const book = await storage.createBook(bookData);
@@ -2370,16 +3162,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const userId = (req.query.userId as string) || 'default';
       const forceRefresh = req.query.refresh === 'true';
       
-      // Get user's Google Books API key
+      // Get Google Books API key - check: 1) per-user DB setting, 2) server-level DB setting (from admin panel), 3) server secrets (.secrets.json or env var)
+      let apiKey: string | undefined;
       const apiKeySetting = await storage.getIntegrationSetting(`user:${userId}:googleBooksApiKey`);
-      if (!apiKeySetting || !apiKeySetting.value) {
+      if (apiKeySetting?.value) {
+        apiKey = apiKeySetting.isSecret ? decrypt(apiKeySetting.value) : apiKeySetting.value;
+      } else {
+        // Check for server-level DB setting (saved from admin panel)
+        const serverDbSetting = await storage.getIntegrationSetting('googleBooksApiKey');
+        if (serverDbSetting?.value) {
+          apiKey = serverDbSetting.isSecret ? decrypt(serverDbSetting.value) : serverDbSetting.value;
+        } else {
+          // Fall back to server-level secret (from .secrets.json or GOOGLE_BOOKS_API_KEY env var)
+          apiKey = getSecret('googleBooksApiKey');
+        }
+      }
+      
+      if (!apiKey) {
         return res.status(400).json({ 
           error: "Google Books API key not configured",
           needsSetup: true 
         });
       }
-
-      const apiKey = apiKeySetting.isSecret ? decrypt(apiKeySetting.value) : apiKeySetting.value;
 
       // Get user's library
       const books = await storage.getAllBooks();
@@ -2451,6 +3255,168 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("Error clearing recommendations cache:", error);
       res.status(500).json({ error: error.message || "Failed to clear cache" });
+    }
+  });
+
+  // "More Like This" - Find similar books across multiple sources
+  app.get("/api/similar-books", async (req, res) => {
+    try {
+      const { title, author, subjects, isbn, sources } = req.query as {
+        title?: string;
+        author?: string;
+        subjects?: string;
+        isbn?: string;
+        sources?: string;
+      };
+
+      if (!title) {
+        return res.status(400).json({ error: "Title is required" });
+      }
+
+      const requestedSources = sources ? sources.split(',') : ['openlibrary', 'googlebooks', 'annas-archive'];
+      const subjectList = subjects ? subjects.split(',').map(s => s.trim()) : [];
+      const results: SimilarBookResult[] = [];
+      const seenTitles = new Set<string>();
+      
+      // Normalize title for deduplication
+      const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
+      seenTitles.add(normalizeTitle(title));
+
+      // Helper to add unique results
+      const addUniqueResults = (items: SimilarBookResult[]) => {
+        for (const item of items) {
+          const normalized = normalizeTitle(item.title);
+          if (!seenTitles.has(normalized)) {
+            seenTitles.add(normalized);
+            results.push(item);
+          }
+        }
+      };
+
+      // Search Open Library (free, no API key needed)
+      if (requestedSources.includes('openlibrary')) {
+        try {
+          console.log('[SimilarBooks] Searching Open Library...');
+          const openLibraryResults = await findSimilarBooks(title, author, subjectList, 10);
+          addUniqueResults(openLibraryResults);
+          console.log(`[SimilarBooks] Found ${openLibraryResults.length} from Open Library`);
+        } catch (error: any) {
+          console.error('[SimilarBooks] Open Library error:', error.message);
+        }
+      }
+
+      // Search Google Books (requires API key)
+      if (requestedSources.includes('googlebooks')) {
+        try {
+          // Get Google Books API key from settings
+          const userId = 'default';
+          const apiKeySetting = await storage.getSetting('googleBooksApiKey');
+          const userApiKeySetting = await storage.getSetting(`user:${userId}:googleBooksApiKey`);
+          const apiKey = apiKeySetting?.value || userApiKeySetting?.value || getSecret('googleBooksApiKey');
+          
+          if (apiKey) {
+            console.log('[SimilarBooks] Searching Google Books...');
+            const searchQuery = author ? `${title} inauthor:${author}` : title;
+            const googleResults = await searchGoogleBooks(searchQuery, apiKey, 10);
+            
+            const googleItems: SimilarBookResult[] = googleResults.map(volume => {
+              const rec = volumeToRecommendation(volume);
+              return {
+                source: 'googlebooks' as const,
+                id: rec.googleBooksId,
+                title: rec.title,
+                author: rec.author,
+                description: rec.description,
+                coverUrl: rec.coverUrl,
+                isbn: rec.isbn,
+                publishedYear: rec.publishedDate ? parseInt(rec.publishedDate.substring(0, 4)) : undefined,
+                publisher: rec.publisher,
+                subjects: rec.categories,
+                rating: rec.averageRating,
+                pageCount: rec.pageCount,
+                downloadable: false,
+              };
+            });
+            
+            addUniqueResults(googleItems);
+            console.log(`[SimilarBooks] Found ${googleItems.length} from Google Books`);
+          } else {
+            console.log('[SimilarBooks] No Google Books API key configured');
+          }
+        } catch (error: any) {
+          console.error('[SimilarBooks] Google Books error:', error.message);
+        }
+      }
+
+      // Search Anna's Archive (requires API key)
+      if (requestedSources.includes('annas-archive')) {
+        try {
+          const getApiType = async (): Promise<'rapidapi' | 'direct' | null> => {
+            const setting = await storage.getSetting("annasArchiveApiType");
+            return (setting?.value as 'rapidapi' | 'direct') || 'rapidapi';
+          };
+          
+          const getApiKey = async () => {
+            const setting = await storage.getSetting("annasArchiveApiKey");
+            if (!setting?.value) return null;
+            return setting.isSecret ? decrypt(setting.value) : setting.value;
+          };
+          
+          const getDonatorKey = async () => {
+            const setting = await storage.getSetting("annasArchiveDonatorKey");
+            if (!setting?.value) return null;
+            return setting.isSecret ? decrypt(setting.value) : setting.value;
+          };
+
+          const orchestrator = await getSourceOrchestrator({ getApiKey, getDonatorKey, getApiType });
+          
+          console.log('[SimilarBooks] Searching Anna\'s Archive...');
+          const searchQuery = author ? `${title} ${author}` : title;
+          const annaResults = await orchestrator.search({
+            query: searchQuery,
+            language: 'en',
+            format: 'epub',
+            limit: 10,
+          });
+
+          const annaItems: SimilarBookResult[] = annaResults.map((result: any) => ({
+            source: 'annas-archive' as const,
+            id: result.id,
+            title: result.title,
+            author: result.author || 'Unknown Author',
+            description: undefined,
+            coverUrl: result.cover_url,
+            isbn: result.isbn,
+            publishedYear: result.year ? parseInt(result.year) : undefined,
+            publisher: result.publisher,
+            format: result.format || result.extension,
+            downloadable: true,
+            md5: result.id,
+          }));
+
+          addUniqueResults(annaItems);
+          console.log(`[SimilarBooks] Found ${annaItems.length} from Anna's Archive`);
+        } catch (error: any) {
+          console.error('[SimilarBooks] Anna\'s Archive error:', error.message);
+        }
+      }
+
+      // Sort: downloadable items first, then by rating
+      results.sort((a, b) => {
+        if (a.downloadable !== b.downloadable) {
+          return b.downloadable ? 1 : -1;
+        }
+        return (b.rating || 0) - (a.rating || 0);
+      });
+
+      res.json({
+        query: { title, author, subjects: subjectList },
+        total: results.length,
+        results: results.slice(0, 30),
+      });
+    } catch (error: any) {
+      console.error("Error finding similar books:", error);
+      res.status(500).json({ error: error.message || "Failed to find similar books" });
     }
   });
 
@@ -2690,6 +3656,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Book/Audiobook delivery endpoints
+  
+  // Check if email service is configured
+  app.get("/api/delivery/configured", async (req, res) => {
+    try {
+      // Check environment variables first
+      const sendgridKey = process.env.SENDGRID_API_KEY;
+      const resendKey = process.env.RESEND_API_KEY;
+      
+      if (sendgridKey || resendKey) {
+        return res.json({ configured: true, provider: sendgridKey ? 'sendgrid' : 'resend' });
+      }
+      
+      // Check settings
+      const settingSendGrid = await storage.getSetting('sendgridApiKey');
+      if (settingSendGrid?.value) {
+        return res.json({ configured: true, provider: 'sendgrid' });
+      }
+      
+      const settingResend = await storage.getSetting('resendApiKey');
+      if (settingResend?.value) {
+        return res.json({ configured: true, provider: 'resend' });
+      }
+      
+      return res.json({ configured: false });
+    } catch (error: any) {
+      console.error("Error checking delivery configuration:", error);
+      res.status(500).json({ configured: false, error: error.message });
+    }
+  });
+
   app.post("/api/delivery/kindle", async (req, res) => {
     try {
       const { bookId, kindleEmail } = req.body;

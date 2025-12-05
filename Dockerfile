@@ -23,15 +23,6 @@ ARG CACHEBUST=1
 # Copy application source (cache invalidated by CACHEBUST arg above)
 COPY . .
 
-# Verify client files are present and show index.html content for debugging
-RUN echo "=== Build info: CACHEBUST=${CACHEBUST} ===" && \
-    echo "=== Verifying client files ===" && \
-    ls -la client/ && \
-    ls -la client/src/ && \
-    test -f client/src/main.tsx && echo "✓ main.tsx found" || (echo "✗ main.tsx MISSING" && exit 1) && \
-    echo "=== client/index.html script tag ===" && \
-    grep -n "script.*main" client/index.html
-
 # Build the application
 # - vite build creates dist/public/ with frontend assets
 # - esbuild bundles server code to dist/index.js

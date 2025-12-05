@@ -1,6 +1,7 @@
 import {
   books,
   audiobooks,
+  audiobookTracks,
   readingProgress,
   listeningProgress,
   collections,
@@ -23,6 +24,7 @@ import {
   meetingRsvps,
   type Book,
   type Audiobook,
+  type AudiobookTrack,
   type ReadingProgress,
   type ListeningProgress,
   type Collection,
@@ -45,6 +47,7 @@ import {
   type MeetingRsvp,
   type InsertBook,
   type InsertAudiobook,
+  type InsertAudiobookTrack,
   type InsertReadingProgress,
   type InsertListeningProgress,
   type InsertCollection,
@@ -123,6 +126,13 @@ export interface IStorage {
   createAudiobook(audiobook: InsertAudiobook): Promise<Audiobook>;
   updateAudiobook(id: string, audiobook: Partial<InsertAudiobook>): Promise<Audiobook | undefined>;
   deleteAudiobook(id: string): Promise<void>;
+
+  // Audiobook Tracks (for multi-file audiobooks)
+  getAudiobookTracks(audiobookId: string): Promise<AudiobookTrack[]>;
+  createAudiobookTrack(track: InsertAudiobookTrack): Promise<AudiobookTrack>;
+  createAudiobookTracks(tracks: InsertAudiobookTrack[]): Promise<AudiobookTrack[]>;
+  deleteAudiobookTracks(audiobookId: string): Promise<void>;
+  getAudiobookTrackByIndex(audiobookId: string, trackIndex: number): Promise<AudiobookTrack | undefined>;
 
   // Reading Progress
   getReadingProgress(bookId: string): Promise<ReadingProgress | undefined>;
@@ -327,6 +337,42 @@ export class DatabaseStorage implements IStorage {
     await db.delete(audiobooks).where(eq(audiobooks.id, id));
   }
 
+  // Audiobook Tracks (for multi-file audiobooks)
+  async getAudiobookTracks(audiobookId: string): Promise<AudiobookTrack[]> {
+    return db
+      .select()
+      .from(audiobookTracks)
+      .where(eq(audiobookTracks.audiobookId, audiobookId))
+      .orderBy(audiobookTracks.trackIndex);
+  }
+
+  async createAudiobookTrack(track: InsertAudiobookTrack): Promise<AudiobookTrack> {
+    const [created] = await db.insert(audiobookTracks).values(track).returning();
+    return created;
+  }
+
+  async createAudiobookTracks(tracks: InsertAudiobookTrack[]): Promise<AudiobookTrack[]> {
+    if (tracks.length === 0) return [];
+    return db.insert(audiobookTracks).values(tracks).returning();
+  }
+
+  async deleteAudiobookTracks(audiobookId: string): Promise<void> {
+    await db.delete(audiobookTracks).where(eq(audiobookTracks.audiobookId, audiobookId));
+  }
+
+  async getAudiobookTrackByIndex(audiobookId: string, trackIndex: number): Promise<AudiobookTrack | undefined> {
+    const [track] = await db
+      .select()
+      .from(audiobookTracks)
+      .where(
+        and(
+          eq(audiobookTracks.audiobookId, audiobookId),
+          eq(audiobookTracks.trackIndex, trackIndex)
+        )
+      );
+    return track;
+  }
+
   // Reading Progress
   async getReadingProgress(bookId: string): Promise<ReadingProgress | undefined> {
     const [progress] = await db
@@ -386,10 +432,10 @@ export class DatabaseStorage implements IStorage {
   // Recent Items
   async getRecentItems(limit: number = 5): Promise<{ books: BookWithProgress[]; audiobooks: AudiobookWithProgress[] }> {
     // Get recent books with progress, sorted by lastReadAt
+    // Include all books that have been opened (have a progress record), not just those with progress > 0
     const recentBooksProgress = await db
       .select()
       .from(readingProgress)
-      .where(sql`${readingProgress.progress} > 0`)
       .orderBy(desc(readingProgress.lastReadAt))
       .limit(limit);
     
@@ -402,10 +448,10 @@ export class DatabaseStorage implements IStorage {
     }
     
     // Get recent audiobooks with progress, sorted by lastListenedAt
+    // Include all audiobooks that have been started (have a progress record)
     const recentAudiobooksProgress = await db
       .select()
       .from(listeningProgress)
-      .where(sql`${listeningProgress.progress} > 0`)
       .orderBy(desc(listeningProgress.lastListenedAt))
       .limit(limit);
     

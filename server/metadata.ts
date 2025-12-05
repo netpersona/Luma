@@ -968,16 +968,66 @@ async function extractEpubMetadata(
     const epub = new EPub(tmpPath);
     
     epub.on("end", async () => {
+      const epubMeta = epub.metadata as any;
+      
       const metadata: ExtractedMetadata = {
-        title: epub.metadata.title || path.basename(filename, ".epub"),
-        author: epub.metadata.creator,
-        description: epub.metadata.description,
-        language: epub.metadata.language,
+        title: epubMeta.title || path.basename(filename, ".epub"),
+        author: epubMeta.creator,
+        description: epubMeta.description,
+        language: epubMeta.language,
+        publisher: epubMeta.publisher,
       };
+
+      // Extract ISBN - check various possible locations in EPUB metadata
+      // EPUB files can store ISBN in different fields: ISBN, identifier, or dc:identifier
+      let isbn: string | undefined;
+      
+      // Check direct ISBN field
+      if (epubMeta.ISBN) {
+        isbn = epubMeta.ISBN;
+      } else if (epubMeta.isbn) {
+        isbn = epubMeta.isbn;
+      }
+      
+      // Check identifier field (common location for ISBN)
+      if (!isbn && epubMeta.identifier) {
+        const identifier = epubMeta.identifier;
+        if (typeof identifier === 'string') {
+          // Check if it looks like an ISBN (10 or 13 digits, possibly with hyphens)
+          const isbnMatch = identifier.match(/(?:ISBN[:\s-]*)?(\d{10}|\d{13}|\d{3}-\d{1,5}-\d{1,7}-\d{1,7}-\d{1})/i);
+          if (isbnMatch) {
+            isbn = isbnMatch[1] || isbnMatch[0];
+          }
+        }
+      }
+      
+      // Check identifiers array if present (some EPUB parsers provide this)
+      if (!isbn && Array.isArray(epubMeta.identifiers)) {
+        for (const id of epubMeta.identifiers) {
+          if (id && typeof id === 'object') {
+            if (id.scheme?.toLowerCase() === 'isbn' || id.type?.toLowerCase() === 'isbn') {
+              isbn = id.value || id.id;
+              break;
+            }
+          } else if (typeof id === 'string') {
+            const isbnMatch = id.match(/(?:ISBN[:\s-]*)?(\d{10}|\d{13}|\d{3}-\d{1,5}-\d{1,7}-\d{1,7}-\d{1})/i);
+            if (isbnMatch) {
+              isbn = isbnMatch[1] || isbnMatch[0];
+              break;
+            }
+          }
+        }
+      }
+      
+      // Clean up ISBN - remove hyphens and spaces
+      if (isbn) {
+        metadata.isbn = isbn.replace(/[-\s]/g, '');
+        console.log(`[EPUB Metadata] Found ISBN: ${metadata.isbn}`);
+      }
 
       // Try to extract cover image
       try {
-        const cover = (epub.metadata as any).cover;
+        const cover = epubMeta.cover;
         if (cover) {
           const [, coverData] = await new Promise<[any, Buffer]>((res, rej) => {
             epub.getImage(cover, (err, data, mimeType) => {
@@ -1116,5 +1166,302 @@ async function extractAudioMetadata(
       fs.unlinkSync(tmpPath);
     } catch {}
     throw err;
+  }
+}
+
+// ============================================================================
+// OPEN LIBRARY ISBN LOOKUP & METADATA ENRICHMENT
+// Uses the free Open Library API to find ISBNs and enrich book metadata
+// ============================================================================
+
+interface OpenLibrarySearchResult {
+  numFound: number;
+  docs: Array<{
+    title?: string;
+    author_name?: string[];
+    isbn?: string[];
+    first_publish_year?: number;
+    key?: string;
+    subject?: string[];
+    publisher?: string[];
+    number_of_pages?: number;
+  }>;
+}
+
+interface OpenLibraryBookData {
+  title?: string;
+  authors?: Array<{ key: string }>;
+  subjects?: Array<{ name: string } | string>;
+  subject_places?: Array<{ name: string } | string>;
+  subject_times?: Array<{ name: string } | string>;
+  description?: string | { value: string };
+  first_publish_date?: string;
+  publish_date?: string;
+  publishers?: string[];
+  number_of_pages?: number;
+  covers?: number[];
+}
+
+export interface EnrichedMetadata {
+  title?: string;
+  author?: string;
+  description?: string;
+  subjects?: string[];
+  publishedDate?: string;
+  publisher?: string;
+  pageCount?: number;
+  coverUrl?: string;
+}
+
+/**
+ * Enrich book metadata using ISBN via Open Library API
+ * Fetches tags/subjects, publication date, description, page count, etc.
+ * This is a free API that doesn't require authentication
+ */
+export async function enrichMetadataByIsbn(isbn: string): Promise<EnrichedMetadata | null> {
+  try {
+    const cleanIsbn = isbn.replace(/[-\s]/g, '');
+    console.log(`[OpenLibrary] Enriching metadata for ISBN: ${cleanIsbn}`);
+
+    // First try the ISBN API for edition-specific data
+    const isbnUrl = `https://openlibrary.org/isbn/${cleanIsbn}.json`;
+    const isbnResponse = await fetch(isbnUrl, {
+      headers: {
+        'User-Agent': 'Luma-EReader/1.0',
+      },
+    });
+
+    if (!isbnResponse.ok) {
+      console.log(`[OpenLibrary] ISBN lookup failed, trying search...`);
+      return enrichMetadataByIsbnSearch(cleanIsbn);
+    }
+
+    const isbnData: OpenLibraryBookData = await isbnResponse.json();
+    const enriched: EnrichedMetadata = {};
+
+    // Get title
+    if (isbnData.title) {
+      enriched.title = isbnData.title;
+    }
+
+    // Get description
+    if (isbnData.description) {
+      enriched.description = typeof isbnData.description === 'string' 
+        ? isbnData.description 
+        : isbnData.description.value;
+    }
+
+    // Get page count
+    if (isbnData.number_of_pages) {
+      enriched.pageCount = isbnData.number_of_pages;
+    }
+
+    // Get publishers
+    if (isbnData.publishers && isbnData.publishers.length > 0) {
+      enriched.publisher = isbnData.publishers[0];
+    }
+
+    // Get publish date
+    if (isbnData.publish_date) {
+      enriched.publishedDate = isbnData.publish_date;
+    } else if (isbnData.first_publish_date) {
+      enriched.publishedDate = isbnData.first_publish_date;
+    }
+
+    // Get subjects - combine all subject types
+    const allSubjects: string[] = [];
+    
+    const extractSubjects = (arr: Array<{ name: string } | string> | undefined) => {
+      if (!arr) return;
+      for (const item of arr) {
+        const name = typeof item === 'string' ? item : item.name;
+        if (name && !allSubjects.includes(name)) {
+          allSubjects.push(name);
+        }
+      }
+    };
+
+    extractSubjects(isbnData.subjects);
+    extractSubjects(isbnData.subject_places);
+    extractSubjects(isbnData.subject_times);
+
+    // If no subjects from edition, try to get from the work
+    if (allSubjects.length === 0 && isbnData.authors) {
+      // The ISBN data might have a works key we can follow
+      try {
+        const worksUrl = `https://openlibrary.org/isbn/${cleanIsbn}/works.json`;
+        const worksResponse = await fetch(worksUrl, {
+          headers: { 'User-Agent': 'Luma-EReader/1.0' },
+        });
+        
+        if (worksResponse.ok) {
+          const worksData = await worksResponse.json();
+          if (worksData.entries && worksData.entries.length > 0) {
+            const work = worksData.entries[0];
+            extractSubjects(work.subjects);
+            
+            // Also try to get description from work if not in edition
+            if (!enriched.description && work.description) {
+              enriched.description = typeof work.description === 'string'
+                ? work.description
+                : work.description.value;
+            }
+          }
+        }
+      } catch (err) {
+        // Ignore work lookup errors
+      }
+    }
+
+    if (allSubjects.length > 0) {
+      // Limit to 10 most relevant subjects and clean them up
+      enriched.subjects = allSubjects
+        .filter(s => s.length < 50) // Skip very long subject strings
+        .slice(0, 10);
+    }
+
+    // Get cover URL if available
+    if (isbnData.covers && isbnData.covers.length > 0) {
+      enriched.coverUrl = `https://covers.openlibrary.org/b/id/${isbnData.covers[0]}-L.jpg`;
+    }
+
+    console.log(`[OpenLibrary] Enriched metadata:`, {
+      hasDescription: !!enriched.description,
+      subjectsCount: enriched.subjects?.length || 0,
+      hasPublishDate: !!enriched.publishedDate,
+      hasPublisher: !!enriched.publisher,
+    });
+
+    return enriched;
+  } catch (error) {
+    console.error('[OpenLibrary] Error enriching metadata:', error);
+    return null;
+  }
+}
+
+/**
+ * Fallback: search for ISBN to get metadata
+ */
+async function enrichMetadataByIsbnSearch(isbn: string): Promise<EnrichedMetadata | null> {
+  try {
+    const searchUrl = `https://openlibrary.org/search.json?isbn=${isbn}&fields=key,title,author_name,subject,publisher,first_publish_year,number_of_pages_median&limit=1`;
+    
+    const response = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'Luma-EReader/1.0' },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data: OpenLibrarySearchResult = await response.json();
+    
+    if (data.numFound === 0 || !data.docs || data.docs.length === 0) {
+      return null;
+    }
+
+    const doc = data.docs[0];
+    const enriched: EnrichedMetadata = {};
+
+    if (doc.title) enriched.title = doc.title;
+    if (doc.author_name && doc.author_name.length > 0) {
+      enriched.author = doc.author_name.join(', ');
+    }
+    if (doc.first_publish_year) {
+      enriched.publishedDate = String(doc.first_publish_year);
+    }
+    if (doc.publisher && doc.publisher.length > 0) {
+      enriched.publisher = doc.publisher[0];
+    }
+    if (doc.subject && doc.subject.length > 0) {
+      enriched.subjects = doc.subject
+        .filter(s => s.length < 50)
+        .slice(0, 10);
+    }
+
+    return enriched;
+  } catch (error) {
+    console.error('[OpenLibrary] Search fallback error:', error);
+    return null;
+  }
+}
+
+/**
+ * Look up ISBN from Open Library by title and author
+ * This is a free API that doesn't require authentication
+ * Returns the first ISBN found, preferring ISBN-13 over ISBN-10
+ */
+export async function lookupIsbnFromOpenLibrary(
+  title: string,
+  author?: string
+): Promise<string | null> {
+  try {
+    // Build the search URL with title and optional author
+    const params = new URLSearchParams({
+      title: title,
+      fields: 'key,title,author_name,isbn,first_publish_year',
+      limit: '5',
+    });
+    
+    if (author) {
+      params.set('author', author);
+    }
+    
+    const url = `https://openlibrary.org/search.json?${params.toString()}`;
+    console.log(`[OpenLibrary] Looking up ISBN for: "${title}" by ${author || 'unknown'}`);
+    
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Luma-EReader/1.0 (https://github.com/your-repo)',
+      },
+    });
+    
+    if (!response.ok) {
+      console.warn(`[OpenLibrary] API returned status ${response.status}`);
+      return null;
+    }
+    
+    const data: OpenLibrarySearchResult = await response.json();
+    
+    if (data.numFound === 0 || !data.docs || data.docs.length === 0) {
+      console.log(`[OpenLibrary] No results found for "${title}"`);
+      return null;
+    }
+    
+    // Look through results to find one with ISBNs
+    for (const doc of data.docs) {
+      if (doc.isbn && doc.isbn.length > 0) {
+        // Prefer ISBN-13 (starts with 978 or 979 and is 13 digits)
+        const isbn13 = doc.isbn.find(
+          (isbn) => /^(978|979)\d{10}$/.test(isbn.replace(/-/g, ''))
+        );
+        
+        if (isbn13) {
+          console.log(`[OpenLibrary] Found ISBN-13: ${isbn13} for "${title}"`);
+          return isbn13.replace(/-/g, '');
+        }
+        
+        // Fall back to ISBN-10 (10 digits, may end with X)
+        const isbn10 = doc.isbn.find(
+          (isbn) => /^\d{9}[\dXx]$/.test(isbn.replace(/-/g, ''))
+        );
+        
+        if (isbn10) {
+          console.log(`[OpenLibrary] Found ISBN-10: ${isbn10} for "${title}"`);
+          return isbn10.replace(/-/g, '');
+        }
+        
+        // Return any ISBN if neither 13 nor 10 format found
+        const cleanIsbn = doc.isbn[0].replace(/-/g, '');
+        console.log(`[OpenLibrary] Found ISBN: ${cleanIsbn} for "${title}"`);
+        return cleanIsbn;
+      }
+    }
+    
+    console.log(`[OpenLibrary] Results found but no ISBNs for "${title}"`);
+    return null;
+  } catch (error) {
+    console.error('[OpenLibrary] Error looking up ISBN:', error);
+    return null;
   }
 }

@@ -103,6 +103,7 @@ export function createTables() {
       file_size INTEGER,
       duration INTEGER,
       bitrate INTEGER,
+      track_count INTEGER DEFAULT 1,
       description TEXT,
       series TEXT,
       series_index REAL,
@@ -121,6 +122,28 @@ export function createTables() {
       origin_path TEXT
     )
   `);
+
+  // Add track_count column if it doesn't exist (migration for existing DBs)
+  try {
+    sqlite.exec(`ALTER TABLE audiobooks ADD COLUMN track_count INTEGER DEFAULT 1`);
+  } catch (e) { /* Column already exists */ }
+
+  // Audiobook tracks table (for multi-file audiobooks)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS audiobook_tracks (
+      id TEXT PRIMARY KEY,
+      audiobook_id TEXT NOT NULL REFERENCES audiobooks(id) ON DELETE CASCADE,
+      track_index INTEGER NOT NULL,
+      title TEXT,
+      file_path TEXT NOT NULL,
+      duration INTEGER,
+      file_size INTEGER,
+      bitrate INTEGER
+    )
+  `);
+
+  // Create index for faster track lookups
+  sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_audiobook_tracks_audiobook_id ON audiobook_tracks(audiobook_id)`);
 
   // Reading progress table
   sqlite.exec(`
