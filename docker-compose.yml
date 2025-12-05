@@ -9,6 +9,9 @@ services:
       NODE_ENV: production
       PORT: 5000
       SESSION_SECRET: ${SESSION_SECRET:-change-this-secret-in-production}
+      # Set PUID/PGID to match your host user for proper file permissions
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
     volumes:
       # Mount /data for all Luma data: database, books, audiobooks, covers, uploads
       - ${DATA_PATH:-./data}:/data

@@ -39,18 +39,19 @@ FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies including su-exec for user switching
 RUN apk add --no-cache \
     cairo \
     jpeg \
     pango \
     giflib \
     ttf-dejavu \
-    fontconfig
+    fontconfig \
+    su-exec
 
-# Create app user for security (use different GID/UID to avoid conflicts)
-RUN addgroup -g 1001 luma && \
-    adduser -D -u 1001 -G luma luma
+# Create default app user (will be modified at runtime based on PUID/PGID)
+RUN addgroup -g 1000 luma && \
+    adduser -D -u 1000 -G luma luma
 
 # Copy package files
 COPY package*.json ./
@@ -66,13 +67,13 @@ COPY --from=builder /app/dist ./dist
 # Copy shared schema (needed for runtime type imports)
 COPY --from=builder /app/shared ./shared
 
-# Create directories for user data with proper permissions
-# /data stores everything: database, books, audiobooks, covers, and uploads
-RUN mkdir -p /data/books /data/audiobooks /data/covers /data/uploads && \
-    chown -R luma:luma /app /data
+# Copy entrypoint script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
-# Switch to non-root user
-USER luma
+# Create directories for user data
+# /data stores everything: database, books, audiobooks, covers, and uploads
+RUN mkdir -p /data/books /data/audiobooks /data/covers /data/uploads
 
 # Expose port
 EXPOSE 5000
@@ -82,10 +83,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD node -e "require('http').get('http://localhost:5000/api/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"
 
 # Environment defaults
+# PUID/PGID: User/Group ID for file permissions (Unraid compatible)
 # DATA_DIR: Location for SQLite database and all data files
 ENV NODE_ENV=production \
     PORT=5000 \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    PUID=1000 \
+    PGID=1000
 
-# Start the application
-CMD ["node", "dist/index.js"]
+# Run as root initially, entrypoint will switch to correct user
+ENTRYPOINT ["/docker-entrypoint.sh"]
