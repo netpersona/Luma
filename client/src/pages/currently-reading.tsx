@@ -18,23 +18,26 @@ export default function CurrentlyReading() {
 
   const isLoading = booksLoading || audiobooksLoading;
 
-  // Filter items with progress
+  // Filter items with progress - include all items that have been opened (have a progress record)
   const inProgressBooks = books
-    .filter((book) => book.progress && book.progress.progress > 0 && !book.progress.completed)
+    .filter((book) => book.progress && !book.progress.completed)
     .map((book) => ({ ...book, type: "book" as const }));
 
   const inProgressAudiobooks = audiobooks
     .filter(
       (audiobook) =>
         audiobook.progress &&
-        audiobook.progress.progress > 0 &&
         !audiobook.progress.completed
     )
     .map((audiobook) => ({ ...audiobook, type: "audiobook" as const }));
 
   const allInProgress = [...inProgressBooks, ...inProgressAudiobooks].sort((a, b) => {
-    const aDate = a.progress?.lastReadAt || a.progress?.lastListenedAt;
-    const bDate = b.progress?.lastReadAt || b.progress?.lastListenedAt;
+    const aDate = a.type === "book" 
+      ? a.progress?.lastReadAt 
+      : a.progress?.lastListenedAt;
+    const bDate = b.type === "book" 
+      ? b.progress?.lastReadAt 
+      : b.progress?.lastListenedAt;
     if (!aDate || !bDate) return 0;
     return new Date(bDate).getTime() - new Date(aDate).getTime();
   });

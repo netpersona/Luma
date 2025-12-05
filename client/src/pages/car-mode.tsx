@@ -229,23 +229,23 @@ export default function CarMode() {
       <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/50 to-black/80" />
       
       <div className={`relative z-10 h-full flex flex-col transition-opacity duration-300 ${showControls ? "opacity-100" : "opacity-0"}`}>
-        <div className="flex items-center justify-between p-4 md:p-6">
+        <div className="flex items-center justify-between p-3 sm:p-4 md:p-6">
           <Button
             variant="ghost"
             size="icon"
             onClick={handleExit}
-            className="h-12 w-12 text-white/80 hover:text-white hover:bg-white/10"
+            className="h-10 w-10 sm:h-12 sm:w-12 text-white/80 hover:text-white hover:bg-white/10 flex-shrink-0"
             data-testid="button-exit-car-mode"
           >
-            <X className="h-8 w-8" />
+            <X className="h-6 w-6 sm:h-8 sm:w-8" />
           </Button>
           
-          <div className="text-center flex-1 px-4">
-            <h1 className="text-lg md:text-xl font-semibold truncate max-w-md mx-auto">
+          <div className="text-center flex-1 px-2 sm:px-4 min-w-0">
+            <h1 className="text-base sm:text-lg md:text-xl font-semibold truncate">
               {audiobook.title}
             </h1>
             {audiobook.author && (
-              <p className="text-sm text-white/70 truncate max-w-sm mx-auto">
+              <p className="text-xs sm:text-sm text-white/70 truncate">
                 {audiobook.author}
               </p>
             )}
@@ -255,24 +255,24 @@ export default function CarMode() {
             variant="ghost"
             size="sm"
             onClick={cyclePlaybackRate}
-            className="h-12 px-4 text-white/80 hover:text-white hover:bg-white/10"
+            className="h-10 sm:h-12 px-2 sm:px-4 text-white/80 hover:text-white hover:bg-white/10 flex-shrink-0"
             data-testid="button-car-speed"
           >
-            <Gauge className="h-5 w-5 mr-2" />
-            <span className="text-lg tabular-nums">{playbackRate}x</span>
+            <Gauge className="h-4 w-4 sm:h-5 sm:w-5 mr-1 sm:mr-2" />
+            <span className="text-base sm:text-lg tabular-nums">{playbackRate}x</span>
           </Button>
         </div>
         
-        <div className="flex-1 flex items-center justify-center">
-          <div className="flex items-center gap-8 md:gap-16">
+        <div className="flex-1 flex items-center justify-center px-4">
+          <div className="flex items-center gap-4 sm:gap-8 md:gap-12">
             <button
               onClick={(e) => { e.stopPropagation(); skip(-30); }}
-              className="flex flex-col items-center gap-2 p-6 rounded-full hover:bg-white/10 transition-colors active:scale-95"
+              className="flex flex-col items-center gap-1 p-3 sm:p-4 md:p-6 rounded-full hover:bg-white/10 transition-colors active:scale-95"
               data-testid="button-car-skip-back"
             >
               <div className="relative">
-                <SkipBack className="h-16 w-16 md:h-20 md:w-20" />
-                <span className="absolute inset-0 flex items-center justify-center text-sm font-bold">
+                <SkipBack className="h-10 w-10 sm:h-14 sm:w-14 md:h-16 md:w-16" />
+                <span className="absolute inset-0 flex items-center justify-center text-xs sm:text-sm font-bold">
                   30
                 </span>
               </div>
@@ -280,24 +280,24 @@ export default function CarMode() {
             
             <button
               onClick={(e) => { e.stopPropagation(); togglePlay(); }}
-              className="h-32 w-32 md:h-40 md:w-40 rounded-full bg-white text-black flex items-center justify-center hover:bg-white/90 transition-all active:scale-95 shadow-2xl"
+              className="h-20 w-20 sm:h-28 sm:w-28 md:h-32 md:w-32 rounded-full bg-white text-black flex items-center justify-center hover:bg-white/90 transition-all active:scale-95 shadow-2xl flex-shrink-0"
               data-testid="button-car-play-pause"
             >
               {isPlaying ? (
-                <Pause className="h-16 w-16 md:h-20 md:w-20" />
+                <Pause className="h-10 w-10 sm:h-14 sm:w-14 md:h-16 md:w-16" />
               ) : (
-                <Play className="h-16 w-16 md:h-20 md:w-20 ml-2" />
+                <Play className="h-10 w-10 sm:h-14 sm:w-14 md:h-16 md:w-16 ml-1 sm:ml-2" />
               )}
             </button>
             
             <button
               onClick={(e) => { e.stopPropagation(); skip(30); }}
-              className="flex flex-col items-center gap-2 p-6 rounded-full hover:bg-white/10 transition-colors active:scale-95"
+              className="flex flex-col items-center gap-1 p-3 sm:p-4 md:p-6 rounded-full hover:bg-white/10 transition-colors active:scale-95"
               data-testid="button-car-skip-forward"
             >
               <div className="relative">
-                <SkipForward className="h-16 w-16 md:h-20 md:w-20" />
-                <span className="absolute inset-0 flex items-center justify-center text-sm font-bold">
+                <SkipForward className="h-10 w-10 sm:h-14 sm:w-14 md:h-16 md:w-16" />
+                <span className="absolute inset-0 flex items-center justify-center text-xs sm:text-sm font-bold">
                   30
                 </span>
               </div>
@@ -305,24 +305,24 @@ export default function CarMode() {
           </div>
         </div>
         
-        <div className="p-6 md:p-8 space-y-4">
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-white/70 tabular-nums w-16 text-right">
+        <div className="p-4 sm:p-6 md:p-8 space-y-3 sm:space-y-4">
+          <div className="flex items-center gap-2 sm:gap-4">
+            <span className="text-xs sm:text-sm text-white/70 tabular-nums w-12 sm:w-16 text-right">
               {formatTime(currentTime)}
             </span>
-            <div className="flex-1 h-2 bg-white/20 rounded-full overflow-hidden">
+            <div className="flex-1 h-1.5 sm:h-2 bg-white/20 rounded-full overflow-hidden">
               <div 
                 className="h-full bg-white transition-all duration-200"
                 style={{ width: `${progress}%` }}
               />
             </div>
-            <span className="text-sm text-white/70 tabular-nums w-16">
+            <span className="text-xs sm:text-sm text-white/70 tabular-nums w-12 sm:w-16">
               {formatTime(duration)}
             </span>
           </div>
           
-          <div className="flex items-center justify-center gap-4 text-sm text-white/50">
-            <span>Tap screen to show controls</span>
+          <div className="flex items-center justify-center gap-2 sm:gap-4 text-xs sm:text-sm text-white/50">
+            <span>Tap to show controls</span>
             <span className="hidden md:inline">|</span>
             <span className="hidden md:inline">Space: Play/Pause</span>
             <span className="hidden md:inline">|</span>

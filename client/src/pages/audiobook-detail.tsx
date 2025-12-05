@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
-import { Headphones, ArrowLeft, Clock, Calendar, Tag, Building2, BookMarked, Send, Car, FolderPlus, ImageIcon, Image, Sparkles, Search, Loader2 } from "lucide-react";
+import { Headphones, ArrowLeft, Clock, Calendar, Tag, Building2, BookMarked, Send, Car, FolderPlus, ImageIcon, Image, Sparkles, Search, Loader2, Pencil, Trash2 } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 import { parseJsonArray, sanitizeDescription } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +10,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -254,7 +257,9 @@ export default function AudiobookDetail() {
   const [, params] = useRoute("/audiobooks/:id");
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const { user } = useAuth();
   const audiobookId = params?.id;
+  const isAdmin = user?.role === "admin";
 
   const [rating, setRating] = useState(0);
   const [review, setReview] = useState("");
@@ -264,6 +269,24 @@ export default function AudiobookDetail() {
   const [showSimilarBooksModal, setShowSimilarBooksModal] = useState(false);
   const [selectedCollection, setSelectedCollection] = useState<string>("");
   const [showCoverModal, setShowCoverModal] = useState(false);
+  
+  // Delete state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  
+  // Edit metadata state
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editAuthor, setEditAuthor] = useState("");
+  const [editNarrator, setEditNarrator] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editSeries, setEditSeries] = useState("");
+  const [editSeriesIndex, setEditSeriesIndex] = useState("");
+  const [editPublisher, setEditPublisher] = useState("");
+  const [editPublishedDate, setEditPublishedDate] = useState("");
+  const [editIsbn, setEditIsbn] = useState("");
+  const [editLanguage, setEditLanguage] = useState("");
+  const [editTags, setEditTags] = useState("");
+  const [isLookingUp, setIsLookingUp] = useState(false);
 
   const { data: audiobook, isLoading } = useQuery<AudiobookWithProgress>({
     queryKey: ["/api/audiobooks", audiobookId],
@@ -400,6 +423,209 @@ export default function AudiobookDetail() {
       });
     },
   });
+
+  // Update audiobook metadata mutation
+  const updateAudiobookMutation = useMutation({
+    mutationFn: async (data: {
+      title: string;
+      author?: string;
+      narrator?: string;
+      description?: string;
+      series?: string;
+      seriesIndex?: number;
+      publisher?: string;
+      publishedDate?: string;
+      isbn?: string;
+      language?: string;
+      tags?: string;
+    }) => {
+      return apiRequest("PUT", `/api/audiobooks/${audiobookId}`, data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/audiobooks", audiobookId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/audiobooks"] });
+      toast({
+        title: "Metadata updated",
+        description: "Audiobook information has been updated successfully.",
+      });
+      setShowEditDialog(false);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to update metadata",
+        description: error.message || "Could not update audiobook metadata.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Delete audiobook mutation
+  const deleteAudiobookMutation = useMutation({
+    mutationFn: async () => {
+      return apiRequest("DELETE", `/api/audiobooks/${audiobookId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/audiobooks", audiobookId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/audiobooks"] });
+      toast({
+        title: "Audiobook deleted",
+        description: "The audiobook has been permanently deleted from your library.",
+      });
+      setLocation("/");
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to delete audiobook",
+        description: error.message || "Could not delete the audiobook.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Open edit dialog with current values
+  const handleOpenEditDialog = () => {
+    if (audiobook) {
+      setEditTitle(audiobook.title || "");
+      setEditAuthor(audiobook.author || "");
+      setEditNarrator(audiobook.narrator || "");
+      setEditDescription(audiobook.description || "");
+      setEditSeries(audiobook.series || "");
+      setEditSeriesIndex(audiobook.seriesIndex?.toString() || "");
+      setEditPublisher(audiobook.publisher || "");
+      setEditPublishedDate(audiobook.publishedDate || "");
+      setEditIsbn(audiobook.isbn || "");
+      setEditLanguage(audiobook.language || "");
+      const tags = parseJsonArray(audiobook.tags);
+      setEditTags(tags.join(", "));
+      setShowEditDialog(true);
+    }
+  };
+
+  // Save edited metadata
+  const handleSaveMetadata = () => {
+    if (!editTitle.trim()) {
+      toast({
+        title: "Title required",
+        description: "Please enter a title for the audiobook.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Validate seriesIndex is a valid number if provided
+    let parsedSeriesIndex: number | undefined;
+    if (editSeriesIndex.trim()) {
+      const parsed = parseFloat(editSeriesIndex);
+      if (isNaN(parsed)) {
+        toast({
+          title: "Invalid series index",
+          description: "Please enter a valid number for series index (e.g., 1, 2, 2.5).",
+          variant: "destructive",
+        });
+        return;
+      }
+      parsedSeriesIndex = parsed;
+    }
+
+    const tagsArray = editTags
+      .split(",")
+      .map(t => t.trim())
+      .filter(t => t.length > 0);
+
+    updateAudiobookMutation.mutate({
+      title: editTitle.trim(),
+      author: editAuthor.trim() || undefined,
+      narrator: editNarrator.trim() || undefined,
+      description: editDescription.trim() || undefined,
+      series: editSeries.trim() || undefined,
+      seriesIndex: parsedSeriesIndex,
+      publisher: editPublisher.trim() || undefined,
+      publishedDate: editPublishedDate.trim() || undefined,
+      isbn: editIsbn.trim() || undefined,
+      language: editLanguage.trim() || undefined,
+      tags: tagsArray.length > 0 ? JSON.stringify(tagsArray) : undefined,
+    });
+  };
+
+  // ISBN lookup to fetch metadata
+  const handleIsbnLookup = async () => {
+    const isbn = editIsbn.trim().replace(/[-\s]/g, '');
+    
+    if (!isbn) {
+      toast({
+        title: "ISBN required",
+        description: "Please enter an ISBN to look up.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // Basic validation
+    const isValidIsbn10 = /^[0-9]{9}[0-9X]$/i.test(isbn);
+    const isValidIsbn13 = /^[0-9]{13}$/.test(isbn);
+    
+    if (!isValidIsbn10 && !isValidIsbn13) {
+      toast({
+        title: "Invalid ISBN format",
+        description: "Please enter a valid 10 or 13 digit ISBN.",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    setIsLookingUp(true);
+    
+    try {
+      const response = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
+      const data = await response.json();
+      
+      const bookData = data[`ISBN:${isbn}`];
+      
+      if (!bookData) {
+        toast({
+          title: "No results found",
+          description: "Could not find metadata for this ISBN. Try a different ISBN or enter details manually.",
+          variant: "destructive",
+        });
+        return;
+      }
+      
+      // Auto-fill fields from Open Library data
+      if (bookData.title && !editTitle.trim()) {
+        setEditTitle(bookData.title);
+      }
+      
+      if (bookData.authors?.[0]?.name && !editAuthor.trim()) {
+        setEditAuthor(bookData.authors[0].name);
+      }
+      
+      if (bookData.publishers?.[0]?.name && !editPublisher.trim()) {
+        setEditPublisher(bookData.publishers[0].name);
+      }
+      
+      if (bookData.publish_date && !editPublishedDate.trim()) {
+        setEditPublishedDate(bookData.publish_date);
+      }
+      
+      if (bookData.subjects && !editTags.trim()) {
+        const subjects = bookData.subjects.slice(0, 5).map((s: any) => s.name || s);
+        setEditTags(subjects.join(", "));
+      }
+      
+      toast({
+        title: "Metadata found",
+        description: "Fields have been auto-filled from Open Library. Review and save when ready.",
+      });
+    } catch (error) {
+      toast({
+        title: "Lookup failed",
+        description: "Could not connect to Open Library. Please try again later.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLookingUp(false);
+    }
+  };
 
   const handleRatingChange = (newRating: number) => {
     setRating(newRating);
@@ -725,6 +951,28 @@ export default function AudiobookDetail() {
                   size="lg" 
                   variant="outline" 
                   className="bg-white/10 border-white/30 text-white hover:bg-white/20"
+                  onClick={handleOpenEditDialog}
+                  data-testid="button-edit-metadata"
+                >
+                  <Pencil className="h-5 w-5 mr-2" />
+                  Edit Metadata
+                </Button>
+                {isAdmin && (
+                  <Button 
+                    size="lg" 
+                    variant="outline" 
+                    className="bg-red-500/20 border-red-500/50 text-white hover:bg-red-500/30"
+                    onClick={() => setShowDeleteDialog(true)}
+                    data-testid="button-delete-audiobook"
+                  >
+                    <Trash2 className="h-5 w-5 mr-2" />
+                    Delete Audiobook
+                  </Button>
+                )}
+                <Button 
+                  size="lg" 
+                  variant="outline" 
+                  className="bg-white/10 border-white/30 text-white hover:bg-white/20"
                   onClick={() => setShowCollectionDialog(true)}
                   data-testid="button-add-to-collection"
                 >
@@ -836,6 +1084,207 @@ export default function AudiobookDetail() {
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
+
+              {/* Edit Metadata Dialog */}
+              <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+                <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                  <DialogHeader>
+                    <DialogTitle>Edit Audiobook Metadata</DialogTitle>
+                    <DialogDescription>
+                      Update the information for this audiobook.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-4 py-4">
+                    <div className="grid gap-2">
+                      <Label htmlFor="edit-title">Title *</Label>
+                      <Input
+                        id="edit-title"
+                        value={editTitle}
+                        onChange={(e) => setEditTitle(e.target.value)}
+                        placeholder="Audiobook title"
+                        data-testid="input-edit-title"
+                      />
+                    </div>
+                    
+                    <div className="grid gap-2">
+                      <Label htmlFor="edit-author">Author</Label>
+                      <Input
+                        id="edit-author"
+                        value={editAuthor}
+                        onChange={(e) => setEditAuthor(e.target.value)}
+                        placeholder="Author name"
+                        data-testid="input-edit-author"
+                      />
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="edit-narrator">Narrator</Label>
+                      <Input
+                        id="edit-narrator"
+                        value={editNarrator}
+                        onChange={(e) => setEditNarrator(e.target.value)}
+                        placeholder="Narrator name"
+                        data-testid="input-edit-narrator"
+                      />
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="edit-description">Description</Label>
+                      <Textarea
+                        id="edit-description"
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        placeholder="Audiobook description"
+                        className="min-h-[100px]"
+                        data-testid="textarea-edit-description"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="grid gap-2">
+                        <Label htmlFor="edit-series">Series</Label>
+                        <Input
+                          id="edit-series"
+                          value={editSeries}
+                          onChange={(e) => setEditSeries(e.target.value)}
+                          placeholder="Series name"
+                          data-testid="input-edit-series"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="edit-series-index">Series Index</Label>
+                        <Input
+                          id="edit-series-index"
+                          type="number"
+                          step="0.1"
+                          value={editSeriesIndex}
+                          onChange={(e) => setEditSeriesIndex(e.target.value)}
+                          placeholder="e.g., 1, 2, 2.5"
+                          data-testid="input-edit-series-index"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="grid gap-2">
+                        <Label htmlFor="edit-publisher">Publisher</Label>
+                        <Input
+                          id="edit-publisher"
+                          value={editPublisher}
+                          onChange={(e) => setEditPublisher(e.target.value)}
+                          placeholder="Publisher name"
+                          data-testid="input-edit-publisher"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="edit-published-date">Published Date</Label>
+                        <Input
+                          id="edit-published-date"
+                          value={editPublishedDate}
+                          onChange={(e) => setEditPublishedDate(e.target.value)}
+                          placeholder="e.g., 2023-01-15"
+                          data-testid="input-edit-published-date"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="grid gap-2">
+                        <Label htmlFor="edit-isbn">ISBN</Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="edit-isbn"
+                            value={editIsbn}
+                            onChange={(e) => setEditIsbn(e.target.value)}
+                            placeholder="ISBN number"
+                            data-testid="input-edit-isbn"
+                            className="flex-1"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={handleIsbnLookup}
+                            disabled={isLookingUp || !editIsbn.trim()}
+                            data-testid="button-isbn-lookup"
+                          >
+                            {isLookingUp ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Search className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Enter ISBN and click search to auto-fill metadata
+                        </p>
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="edit-language">Language</Label>
+                        <Input
+                          id="edit-language"
+                          value={editLanguage}
+                          onChange={(e) => setEditLanguage(e.target.value)}
+                          placeholder="e.g., English"
+                          data-testid="input-edit-language"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="edit-tags">Tags</Label>
+                      <Input
+                        id="edit-tags"
+                        value={editTags}
+                        onChange={(e) => setEditTags(e.target.value)}
+                        placeholder="Comma-separated tags (e.g., Fiction, Mystery, Thriller)"
+                        data-testid="input-edit-tags"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Separate multiple tags with commas
+                      </p>
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setShowEditDialog(false)} data-testid="button-cancel-edit">
+                      Cancel
+                    </Button>
+                    <Button 
+                      onClick={handleSaveMetadata}
+                      disabled={updateAudiobookMutation.isPending}
+                      data-testid="button-save-metadata"
+                    >
+                      {updateAudiobookMutation.isPending ? "Saving..." : "Save Changes"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              {/* Delete Confirmation Dialog */}
+              {audiobook && (
+                <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Delete Audiobook</DialogTitle>
+                      <DialogDescription>
+                        Are you sure you want to delete "{audiobook.title}"? This action cannot be undone. The audiobook file and all associated data (progress, bookmarks) will be permanently removed.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                      <Button variant="outline" onClick={() => setShowDeleteDialog(false)} data-testid="button-cancel-delete">
+                        Cancel
+                      </Button>
+                      <Button 
+                        variant="destructive"
+                        onClick={() => deleteAudiobookMutation.mutate()}
+                        disabled={deleteAudiobookMutation.isPending}
+                        data-testid="button-confirm-delete"
+                      >
+                        {deleteAudiobookMutation.isPending ? "Deleting..." : "Delete Audiobook"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              )}
             </div>
           </div>
         </div>

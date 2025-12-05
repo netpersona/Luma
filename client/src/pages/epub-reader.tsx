@@ -393,7 +393,7 @@ export default function EpubReader() {
         height: "100%",
         spread: "none",
         flow: "paginated",
-        manager: "continuous",
+        manager: "default",
       });
       renditionRef.current = rendition;
 
@@ -437,7 +437,10 @@ export default function EpubReader() {
         const doc = contents.document;
         if (doc) {
           const style = doc.createElement('style');
-          style.textContent = openDyslexicFontCSS;
+          // Inject fonts
+          style.textContent = `
+            ${openDyslexicFontCSS}
+          `;
           doc.head.appendChild(style);
         }
       });
@@ -489,13 +492,24 @@ export default function EpubReader() {
         startLocation = undefined;
       }
 
-      rendition.display(startLocation).then(() => {
+      // Wait for book to be ready before displaying to ensure proper pagination
+      bookInstance.ready.then(() => {
+        if (isDestroyed || !rendition) return;
+        
+        // Log the book's flow metadata for debugging
+        console.log("Book flow metadata:", (bookInstance.package?.metadata as any)?.flow);
+        
+        return rendition.display(startLocation);
+      }).then(() => {
+        if (isDestroyed) return;
         if (book.progress?.progress) {
           setProgress(book.progress.progress);
         }
       }).catch((err: Error) => {
         console.error("Failed to display epub:", err);
-        setEpubLoadError(`Failed to render book: ${err.message || "Unknown error"}`);
+        if (!isDestroyed) {
+          setEpubLoadError(`Failed to render book: ${err.message || "Unknown error"}`);
+        }
       });
 
       // Generate locations for accurate progress percentage tracking
@@ -789,7 +803,9 @@ export default function EpubReader() {
       }
     }, 200);
     
-    return () => clearTimeout(timeoutId);
+    return () => {
+      clearTimeout(timeoutId);
+    };
   }, [isFullscreen]);
 
   // Keep highlights refs in sync with query data

@@ -11,6 +11,7 @@ import { BookOpen, Headphones, Upload, Loader2 } from "lucide-react";
 import { ObjectUploader } from "@/components/object-uploader";
 import { DropZone } from "@/components/drop-zone";
 import { ContinueReadingBanner } from "@/components/ContinueReadingBanner";
+import { MultiFileAudiobookImport } from "@/components/multi-file-audiobook-import";
 import { useToast } from "@/hooks/use-toast";
 import { parseJsonArray } from "@/lib/utils";
 import type { BookWithProgress, AudiobookWithProgress, UserRating } from "@shared/schema";
@@ -155,7 +156,7 @@ export default function Library() {
 
     // Date range filter
     if (advancedFilters.dateRange !== "all") {
-      const addedAt = new Date(item.addedAt);
+      const addedAt = item.addedAt ? new Date(item.addedAt) : new Date(0);
       const now = new Date();
 
       switch (advancedFilters.dateRange) {
@@ -209,7 +210,9 @@ export default function Library() {
         return (b.progress?.progress || 0) - (a.progress?.progress || 0);
       case "recent":
       default:
-        return new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime();
+        const aAddedAt = a.addedAt ? new Date(a.addedAt).getTime() : 0;
+        const bAddedAt = b.addedAt ? new Date(b.addedAt).getTime() : 0;
+        return bAddedAt - aAddedAt;
     }
   });
 
@@ -249,13 +252,21 @@ export default function Library() {
 
   const uploadIdsRef = useState<string[]>([])[0];
 
-  const handleGetUploadParameters = async () => {
+  const handleGetUploadParameters = async (file: { name: string; type: string; size: number }) => {
     const res = await fetch("/api/objects/upload", { method: "POST" });
     const { uploadURL, uploadId } = await res.json();
     // Store the upload ID so we can send it to process-uploads later
     uploadIdsRef.push(uploadId);
-    console.log('[Upload] Got upload ID:', uploadId);
-    return { method: "PUT" as const, url: uploadURL };
+    console.log('[Upload] Got upload ID:', uploadId, 'for file:', file.name);
+    // Encode filename in URL query parameter (more reliable than headers)
+    const urlWithFilename = `${uploadURL}?filename=${encodeURIComponent(file.name)}`;
+    return { 
+      method: "PUT" as const, 
+      url: urlWithFilename,
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+      }
+    };
   };
 
   const handleUploadComplete = async (result: any) => {
@@ -437,16 +448,19 @@ export default function Library() {
               </p>
             </div>
             {!searchQuery && (
-              <ObjectUploader
-                maxNumberOfFiles={20}
-                allowedFileTypes={[".epub", ".pdf", ".mobi", ".cbz", ".cbr", ".m4b", ".mp3", ".m4a"]}
-                onGetUploadParameters={handleGetUploadParameters}
-                onComplete={handleUploadComplete}
-                buttonVariant="default"
-              >
-                <Upload className="h-4 w-4 mr-2" />
-                Upload Files
-              </ObjectUploader>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <ObjectUploader
+                  maxNumberOfFiles={20}
+                  allowedFileTypes={[".epub", ".pdf", ".mobi", ".cbz", ".cbr", ".m4b", ".mp3", ".m4a"]}
+                  onGetUploadParameters={handleGetUploadParameters}
+                  onComplete={handleUploadComplete}
+                  buttonVariant="default"
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  Upload Files
+                </ObjectUploader>
+                <MultiFileAudiobookImport />
+              </div>
             )}
           </div>
         ) : viewMode === "grid" ? (

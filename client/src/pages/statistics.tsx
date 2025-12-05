@@ -91,9 +91,11 @@ export default function Statistics() {
     const thisYear = now.getFullYear();
 
     const completedBooks = books.filter(b => b.progress?.completed);
-    const inProgressBooks = books.filter(b => b.progress && !b.progress.completed && b.progress.progress > 0);
+    // Include all books that have been opened (have a progress record), not just those with progress > 0
+    const inProgressBooks = books.filter(b => b.progress && !b.progress.completed);
     const completedAudiobooks = audiobooks.filter(a => a.progress?.completed);
-    const inProgressAudiobooks = audiobooks.filter(a => a.progress && !a.progress.completed && a.progress.progress > 0);
+    // Include all audiobooks that have been started (have a progress record), not just those with progress > 0
+    const inProgressAudiobooks = audiobooks.filter(a => a.progress && !a.progress.completed);
 
     const booksThisMonth = completedBooks.filter(b => {
       if (!b.progress?.lastReadAt) return false;

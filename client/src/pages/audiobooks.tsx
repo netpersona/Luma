@@ -113,6 +113,7 @@ export default function Audiobooks() {
 
     // Date range filter
     if (advancedFilters.dateRange !== "all") {
+      if (!audiobook.addedAt) return false;
       const addedAt = new Date(audiobook.addedAt);
       const now = new Date();
 
@@ -163,7 +164,9 @@ export default function Audiobooks() {
         return (b.progress?.progress || 0) - (a.progress?.progress || 0);
       case "recent":
       default:
-        return new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime();
+        const aDate = a.addedAt ? new Date(a.addedAt).getTime() : 0;
+        const bDate = b.addedAt ? new Date(b.addedAt).getTime() : 0;
+        return bDate - aDate;
     }
   });
 
