@@ -19,6 +19,12 @@ RUN npm ci
 # Copy application source
 COPY . .
 
+# Debug: Verify client files are present (remove after confirming build works)
+RUN echo "=== Verifying client files ===" && \
+    ls -la client/ && \
+    ls -la client/src/ && \
+    test -f client/src/main.tsx && echo "✓ main.tsx found" || (echo "✗ main.tsx MISSING" && exit 1)
+
 # Build the application
 # - vite build creates dist/public/ with frontend assets
 # - esbuild bundles server code to dist/index.js
