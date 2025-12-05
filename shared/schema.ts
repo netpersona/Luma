@@ -89,11 +89,12 @@ export const audiobooks = sqliteTable("audiobooks", {
   author: text("author"),
   narrator: text("narrator"),
   coverUrl: text("cover_url"),
-  filePath: text("file_path").notNull(),
-  format: text("format").notNull(), // m4b, mp3, m4a
+  filePath: text("file_path").notNull(), // For single-file audiobooks; empty for multi-track
+  format: text("format").notNull(), // m4b, mp3, m4a, multi (for multi-track)
   fileSize: integer("file_size"),
-  duration: integer("duration"), // in seconds
+  duration: integer("duration"), // in seconds (total duration for multi-track)
   bitrate: integer("bitrate"),
+  trackCount: integer("track_count").default(1), // Number of tracks (1 for single-file)
   description: text("description"),
   series: text("series"),
   seriesIndex: real("series_index"),
@@ -110,6 +111,18 @@ export const audiobooks = sqliteTable("audiobooks", {
   sourceId: text("source_id"),
   sourceUpdatedAt: integer("source_updated_at", { mode: "timestamp" }),
   originPath: text("origin_path"),
+});
+
+// Audiobook tracks - for multi-file audiobooks (one row per audio file)
+export const audiobookTracks = sqliteTable("audiobook_tracks", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  audiobookId: text("audiobook_id").notNull().references(() => audiobooks.id, { onDelete: "cascade" }),
+  trackIndex: integer("track_index").notNull(), // 0-based index for ordering
+  title: text("title"), // Chapter/track title (from metadata or filename)
+  filePath: text("file_path").notNull(), // Path to the audio file
+  duration: integer("duration"), // Duration in seconds
+  fileSize: integer("file_size"),
+  bitrate: integer("bitrate"),
 });
 
 // Reading progress for books
@@ -486,6 +499,10 @@ export const insertAudiobookSchema = createInsertSchema(audiobooks).omit({
   addedAt: true,
 });
 
+export const insertAudiobookTrackSchema = createInsertSchema(audiobookTracks).omit({
+  id: true,
+});
+
 export const insertReadingProgressSchema = createInsertSchema(readingProgress).omit({
   id: true,
   lastReadAt: true,
@@ -616,6 +633,9 @@ export type InsertBook = z.infer<typeof insertBookSchema>;
 
 export type Audiobook = typeof audiobooks.$inferSelect;
 export type InsertAudiobook = z.infer<typeof insertAudiobookSchema>;
+
+export type AudiobookTrack = typeof audiobookTracks.$inferSelect;
+export type InsertAudiobookTrack = z.infer<typeof insertAudiobookTrackSchema>;
 
 export type ReadingProgress = typeof readingProgress.$inferSelect;
 export type InsertReadingProgress = z.infer<typeof insertReadingProgressSchema>;
