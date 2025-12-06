@@ -10,6 +10,13 @@ import ColorThief from "colorthief";
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
 
+// Allow only valid ISBNs (10 or 13 digits, allow 'X' at end for ISBN-10)
+function isValidIsbn(isbn: string): boolean {
+  // ISBN-10: 10 chars, digits except possibly last char can be X
+  // ISBN-13: 13 digits
+  return (/^\d{9}[\dX]$/.test(isbn) || /^\d{13}$/.test(isbn));
+}
+
 export interface AudioChapter {
   title: string;
   startTime: number; // in seconds
@@ -1221,6 +1228,11 @@ export interface EnrichedMetadata {
 export async function enrichMetadataByIsbn(isbn: string): Promise<EnrichedMetadata | null> {
   try {
     const cleanIsbn = isbn.replace(/[-\s]/g, '');
+    // Validate cleanIsbn
+    if (!isValidIsbn(cleanIsbn)) {
+      console.warn(`[OpenLibrary] Refusing to enrich: invalid ISBN provided: ${JSON.stringify(isbn)}`);
+      return null;
+    }
     console.log(`[OpenLibrary] Enriching metadata for ISBN: ${cleanIsbn}`);
 
     // First try the ISBN API for edition-specific data
